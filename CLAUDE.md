@@ -21,13 +21,13 @@
 
 ## Status (replace, don't append)
 - Talkman SIM active (stays in the main phone, only for SMS). WhatsApp registered on a separate old Android phone as primary device: clean install, no restored backup, contacts permission denied, backup off, neutral profile, 2FA PIN on. Subscribing manually to 3–5 public channels.
-- Phase 1 done: collector, `bridge_mock`, README. Phase 2 bridge built and tested on handwritten fixtures, **never linked yet**. External review fixed 2026-10-17 (collector hardening, privacy masking, export pseudonymization, allowlist hook, `truncated` signal). Tests: 243 pytest, 57 Node. Everything pushed to the private repo `dminakov-dev/whatsapp_scrpr` (main @ `6be9ded` + this file).
+- Phase 1 done: collector, `bridge_mock`, README. Phase 2 bridge built and tested on handwritten fixtures, **never linked yet**. External review fixed 2026-10-17 (collector hardening, privacy masking in logs, allowlist hook, `truncated` signal). Export pseudonymization was removed again: exports keep full ids, and the sample excludes regular groups. Tests: 240 pytest, 57 Node. Everything pushed to the private repo `dminakov-dev/whatsapp_scrpr` (main @ `6be9ded` + this file).
 - **Next: first real link 2026-10-18 — follow the runbook below step by step, report after each stage.**
 - Not done: live link, sample data, REPORT.md. `account_events` holds **mock data only** — not usable as observed limits.
 
 ## Runbook: first real link (2026-10-18)
 **0. One-time `.env`** (root; does not exist yet; the bridge reads it via `../.env`). Start from `.env.example`, then set:
-`BRIDGE_URL=http://127.0.0.1:8002`, `BRIDGE_TOKEN=<openssl rand -hex 32>`, `PSEUDONYM_SALT=<openssl rand -hex 32>`, `RECORD_DIR=fixtures/recorded`, and quiet-mode bridge settings `HISTORY_MIN_FETCH=20`, `HISTORY_MAX_FETCH=100`, `HISTORY_MIN_INTERVAL=90`, `PRESENCE_UNAVAILABLE=1`. Never print the token or salt in chat.
+`BRIDGE_URL=http://127.0.0.1:8002`, `BRIDGE_TOKEN=<openssl rand -hex 32>`, `RECORD_DIR=fixtures/recorded`, and quiet-mode bridge settings `HISTORY_MIN_FETCH=20`, `HISTORY_MAX_FETCH=100`, `HISTORY_MIN_INTERVAL=90`, `PRESENCE_UNAVAILABLE=1`. Never print the token in chat.
 
 **1. Start order** (each in its own terminal, from the repo root):
 1. `.venv/bin/python -m collector.receiver` — receiver first, so no webhook is lost.
@@ -68,7 +68,11 @@
 ## Phases
 1. ~~Phase 1 — Python logic against `bridge_mock/`.~~ Done.
 2. **Phase 2 — real bridge** (`bridge/`). Built; remaining: the runbook above. Never adapt the collector to the bridge; hardening the collector on its own is fine (separate commit, a test per fix). Group `fetchMessages` is unreliable → expect small windows and `possible_gap` events.
-3. **Phase 3 — deliverables:** ≥ 200 records from public channels (`python -m collector.export --chat-type channel`, pseudonymized by default), review for private data, REPORT.md from real `account_events`.
+3. **Phase 3 — deliverables:**
+   - submission sample ≥ 200 records from **channels and announcement-only groups only**. Regular groups are never in the submission export. Exports keep full ids (no pseudonymization; see `docs/decisions.md`);
+   - channels: `python -m collector.export --chat-type channel --out sample/messages.jsonl`. Announcement-only groups: the collector does **not** store `announce` yet (`source.list_chats` ignores it), so selecting them needs a small collector change first (e.g. keep `announce` in `targets` or add an export `--chat-id` filter). Propose it before Phase 3;
+   - review the sample by hand for private data (mentions or phone numbers in text) before committing;
+   - REPORT.md from real `account_events`.
 4. **Phase 4 — bonuses** (optional): Docker Compose, stats dashboard.
 
 **Decision point 2026-10-20:** if the real bridge isn't linked and collecting by then, add a fallback public-source adapter (public Telegram channel or RSS) for submission: a new class implementing `Source` in `collector/source.py` (`health`, `list_chats`, `fetch_history` → `CanonicalMessage`). db / dedup / cursor / backfill code must not change.

@@ -61,11 +61,16 @@ person ids are masked to their last 4 digits, including the participant JID that
 appends to group message ids. `LOG_IDENTIFIERS=full` shows ids when debugging the bridge.
 Stored messages are not masked: the canonical record needs the real author.
 
-## Exports pseudonymize person ids by default
-Submission samples must not expose phone numbers, but an analyst still needs to see that two
-messages share an author. A salted HMAC gives a stable pseudonym that can't be reversed by
-hashing every phone number (the space is small, so an unsalted hash would be). The salt is a
-secret in `.env`. `--no-pseudonymize` exists for our own research exports.
+## Exports keep full ids; the sample excludes regular groups
+Export pseudonymization (salted HMAC of person ids) was built and then removed. Exports always
+keep full identifiers, because the canonical record (`author · url · date · text`) is what
+the assignment asks for. Privacy is handled by **what** goes into the submission sample, not by
+rewriting it: the sample contains only channels and announcement-only groups
+(`groupMetadata.announce`: only admins post). In those, the author is the channel itself or a
+group admin, whose id every member already sees. Regular groups, where ordinary members write,
+are never included in the submission export. They are still collected for our own use and stay
+in the gitignored database and `exports/`. Every sample is still reviewed by hand before
+committing (mentions or phone numbers inside text).
 
 ## Post-homework TODO (not now)
 - **Location and contact cards.** The bridge whitelist drops `location`, `vcard` and `multi_vcard`
@@ -73,10 +78,9 @@ secret in `.env`. `--no-pseudonymize` exists for our own research exports.
 - **Per-chat content types.** The hook exists: `CONTENT_TYPES` / `EXTRA_TYPES_BY_CHAT` in the
   bridge (`createAllowlist`, empty by default) let e.g. `location` through for one chat. Today it
   forwards only the type and caption. Using it for real means mapping the type's fields
-  (coordinates, vCard) into the model extension below, with the same masking and
-  pseudonymization rules.
+  (coordinates, vCard) into the model extension below, with the same log-masking rules.
 - **Group admins.** Record `groupMetadata.participants` with `isAdmin` per group (who controls a
   group is useful OSINT context).
 - **Author display name.** Record `pushname` / `notifyName` per message next to the author id.
 - These need a model extension, e.g. an `extra` JSON column in `messages` / `targets`, plus the
-  same masking and pseudonymization rules.
+  same log-masking rules.

@@ -81,14 +81,12 @@ Export:
 ```bash
 .venv/bin/python -m collector.export                                   # -> exports/messages.jsonl
 .venv/bin/python -m collector.export --chat-type channel --out sample/messages.jsonl
-.venv/bin/python -m collector.export --no-pseudonymize --out exports/research.jsonl
 ```
 
-Exports pseudonymize person ids by default: group authors, and the participant id inside group
-message ids and `wa://` urls, become `anon_<salted HMAC>` (stable, so one author keeps one
-pseudonym). Channels keep their ids. `--no-pseudonymize` exports real ids for your own research;
-never use it for submission samples. Mentions inside message text are not rewritten, so samples
-still need a manual review. `--limit` must be at least 1.
+Exports keep full identifiers (authors, message ids, urls). The submission sample contains only
+channels and announcement-only groups (only admins post, and their ids are visible to every
+member anyway); regular groups are never part of it, and the sample is still reviewed by hand
+before committing. `--limit` must be at least 1.
 
 Tests:
 
@@ -117,8 +115,7 @@ variable. Real environment variables override `.env`. Key settings:
 | `BRIDGE_URL` | `http://127.0.0.1:8001` | the only switch between the mock and the real bridge |
 | `BRIDGE_TOKEN` | empty | shared secret in the `X-Bridge-Token` header (the receiver rejects other requests); empty is for loopback development only and logs a warning |
 | `HOST` / `ALLOW_NON_LOOPBACK` | `127.0.0.1` / off | the receiver must bind to a loopback address; any other `HOST` fails at startup unless `ALLOW_NON_LOOPBACK=1` **and** `BRIDGE_TOKEN` is set |
-| `LOG_IDENTIFIERS` | `masked` | person ids (`@c.us`, `@lid`) in logs / `account_events` of rejected payloads: `masked` keeps the last 4 digits, `full` shows them. Message text is never logged; stored messages always keep full ids |
-| `PSEUDONYM_SALT` | empty | secret for export pseudonymization (≥ 16 chars, e.g. `openssl rand -hex 32`); required unless `--no-pseudonymize` |
+| `LOG_IDENTIFIERS` | `masked` | person ids (`@c.us`, `@lid`) in logs / `account_events` of rejected payloads: `masked` keeps the last 4 digits, `full` shows them. Message text is never logged; stored messages and exports always keep full ids |
 | `BATCH_SIZE` | 50 | messages per backfill request ("one run = a small batch"); 1..125, because the stuck-cursor retry asks for 4× and the bridge accepts at most 500 |
 | `TICK_SLEEP` / `JITTER` | 5 / 2 s | pause between ticks, plus random jitter |
 | `BACKOFF_BASE` / `BACKOFF_MAX` | 1 / 300 s | exponential backoff `base·2^(n-1)`, capped, plus jitter |

@@ -41,8 +41,6 @@ class Config:
     log_level: str = "INFO"
     # Person ids in logs / account_events of rejected payloads: masked (****4567@c.us) or full
     log_identifiers: str = "masked"
-    # Secret salt for export pseudonymization of group authors (HMAC); see collector/privacy.py
-    pseudonym_salt: str = ""
 
     # Pacing and backoff, in seconds
     tick_sleep: float = 5.0
@@ -114,7 +112,6 @@ def load_config(env_file: str | None = ".env") -> Config:
         log_dir=_get("LOG_DIR", d.log_dir, str),
         log_level=_get("LOG_LEVEL", d.log_level, str).upper(),
         log_identifiers=_get("LOG_IDENTIFIERS", d.log_identifiers, str).lower(),
-        pseudonym_salt=_get("PSEUDONYM_SALT", d.pseudonym_salt, str),
         tick_sleep=_get("TICK_SLEEP", d.tick_sleep, float),
         jitter=_get("JITTER", d.jitter, float),
         backoff_base=_get("BACKOFF_BASE", d.backoff_base, float),

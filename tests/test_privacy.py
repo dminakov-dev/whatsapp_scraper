@@ -1,5 +1,5 @@
 """Review fix 3: rejected payloads never leak text or full person ids into logs/account_events;
-stored messages keep full ids; exports pseudonymize person ids by default."""
+stored messages and exports keep full ids."""
 import json
 import logging
 
@@ -10,7 +10,7 @@ from collector import db, receiver
 from collector.config import Config
 from collector.export import export_jsonl
 from collector.models import normalize
-from collector.privacy import mask_ids, pseudonym, pseudonymize_ids, safe_meta
+from collector.privacy import mask_ids, safe_meta
 
 NOW = 1_760_700_000
 GROUP = "120363111111111111@g.us"
@@ -19,7 +19,6 @@ LID = "123456789012345@lid"
 SECRET = "SECRET-TEXT do not log"
 # whatsapp-web.js group message id: the participant JID is the last segment
 GROUP_MSG_ID = f"false_{GROUP}_3EB0AAAA_{PHONE}"
-SALT = "test-salt-0123456789abcdef"
 
 
 # --- masking primitives -----------------------------------------------------------------
@@ -126,52 +125,16 @@ def test_stored_messages_keep_full_identifiers(tmp_path):
     assert row["author"] == PHONE and row["message_id"] == GROUP_MSG_ID and PHONE in row["url"]
 
 
-# --- export pseudonymization ------------------------------------------------------------
+# --- export keeps full identifiers ------------------------------------------------------
 
-def seed(conn):
+def test_export_keeps_full_identifiers(conn, tmp_path):
     db.insert_messages(conn, [
         {"source": "whatsapp", "chat_id": GROUP, "chat_type": "group", "message_id": GROUP_MSG_ID,
          "author": PHONE, "url": f"wa://{GROUP}/{GROUP_MSG_ID}", "date": "2026-10-17T10:00:00Z",
          "text": "hi", "media_type": None, "collected_at": "2026-10-17T12:00:00Z", "via": "backfill"},
-        {"source": "whatsapp", "chat_id": "1@newsletter", "chat_type": "channel",
-         "message_id": "false_1@newsletter_K", "author": "1@newsletter",
-         "url": "https://whatsapp.com/channel/X/1", "date": "2026-10-17T11:00:00Z",
-         "text": "post", "media_type": None, "collected_at": "2026-10-17T12:00:00Z",
-         "via": "backfill"},
     ])
-
-
-def read(path):
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-
-
-def test_pseudonym_is_stable_salted_and_not_reversible_by_eye():
-    assert pseudonym(PHONE, SALT) == pseudonym(PHONE, SALT)
-    assert pseudonym(PHONE, SALT) != pseudonym(PHONE, SALT + "x")
-    assert pseudonym(PHONE, SALT).startswith("anon_") and "4567" not in pseudonym(PHONE, SALT)
-    assert pseudonymize_ids(None, SALT) is None
-
-
-def test_export_pseudonymizes_group_authors_everywhere(conn, tmp_path):
-    seed(conn)
-    out = tmp_path / "m.jsonl"
-    export_jsonl(conn, str(out), pseudonym_salt=SALT)
-    group, channel = read(out)
-    anon = pseudonym(PHONE, SALT)
-    assert group["author"] == anon
-    assert group["message_id"].endswith(f"_{anon}") and GROUP in group["message_id"]
-    assert anon in group["url"]
-    assert "972501234567" not in out.read_text(encoding="utf-8")
-    assert channel["author"] == "1@newsletter"          # channels are not persons
-
-
-def test_export_without_salt_keeps_real_ids(conn, tmp_path):
-    seed(conn)
     out = tmp_path / "m.jsonl"
     export_jsonl(conn, str(out))
-    assert read(out)[0]["author"] == PHONE
-
-
-def test_export_rejects_a_short_salt(conn, tmp_path):
-    with pytest.raises(ValueError, match="salt"):
-        export_jsonl(conn, str(tmp_path / "m.jsonl"), pseudonym_salt="short")
+    [record] = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+    assert record["author"] == PHONE
+    assert record["message_id"] == GROUP_MSG_ID and PHONE in record["url"]
