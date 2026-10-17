@@ -2,8 +2,15 @@
 
 Bridge contract (shared by bridge_mock/ and the real Node bridge)
 -----------------------------------------------------------------
+Health   GET /health            -> {"ok": bool, "state": "CONNECTED" | "UNPAIRED" | ...}
+Chats    GET /chats             -> {"chats": [{"chat_id": str, "name": str}, ...]}
+History  GET /chats/{id}/messages?since=<unix>&limit=N
+                                -> {"messages": [<Message>, ...]  (timestamp >= since, oldest first),
+                                    "oldest_available": int | null}  (oldest timestamp the bridge
+                                    still holds; history is a window, older messages are gone)
 Webhook  POST /webhook          {"event": "message", "message": <Message>}
-History  GET /chats/{id}/messages?since=<unix>&limit=N  -> {"messages": [<Message>, ...]}
+                                {"event": "state", "state": "DISCONNECTED" | "UNPAIRED" | ...}
+         The bridge sends header X-Bridge-Token when BRIDGE_TOKEN is configured.
 
 <Message> = {
     "id":        str,          stable, unique within the chat (whatsapp-web.js id._serialized)
