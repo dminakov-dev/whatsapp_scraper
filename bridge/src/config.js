@@ -1,4 +1,5 @@
 // Bridge settings from the environment (.env is loaded by `node --env-file-if-exists`).
+import { CONTENT_TYPES, isCollectable } from './filter.js';
 
 function num(env, name, def, { min = -Infinity, max = Infinity } = {}) {
   const raw = env[name];
@@ -8,6 +9,38 @@ function num(env, name, def, { min = -Infinity, max = Infinity } = {}) {
     throw new Error(`${name} must be a number in [${min}, ${max}], got ${JSON.stringify(raw)}`);
   }
   return value;
+}
+
+// CONTENT_TYPES=chat,image,... replaces the default allowlist (rarely needed).
+function typeList(env, name, def) {
+  const raw = env[name];
+  if (raw === undefined || raw.trim() === '') return [...def];
+  const types = raw.split(',').map((t) => t.trim()).filter(Boolean);
+  if (!types.length) throw new Error(`${name} must list at least one type`);
+  return types;
+}
+
+// EXTRA_TYPES_BY_CHAT={"<group or channel id>": ["location"], ...}: extra types for single
+// chats only. Direct chats can't be listed: nothing from them ever leaves the bridge.
+function extraTypes(env, name) {
+  const raw = env[name];
+  if (raw === undefined || raw.trim() === '') return {};
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`${name} must be a JSON object, e.g. {"1203...@g.us": ["location"]}`);
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`${name} must be a JSON object of chat id -> array of types`);
+  }
+  for (const [chatId, types] of Object.entries(parsed)) {
+    if (!isCollectable(chatId)) throw new Error(`${name}: ${chatId} is not a group or channel id`);
+    if (!Array.isArray(types) || !types.every((t) => typeof t === 'string' && t)) {
+      throw new Error(`${name}: types for ${chatId} must be an array of strings`);
+    }
+  }
+  return parsed;
 }
 
 function bool(env, name, def) {
@@ -41,6 +74,9 @@ export function loadConfig(env = process.env) {
     // Keep it below the collector's REQUEST_TIMEOUT so the bridge answers first.
     opTimeoutMs: num(env, 'OP_TIMEOUT_MS', 8000, { min: 100 }),
     presenceUnavailable: bool(env, 'PRESENCE_UNAVAILABLE', true),
+    // Content-type allowlist: base types for every chat, plus per-chat extras (empty).
+    contentTypes: typeList(env, 'CONTENT_TYPES', CONTENT_TYPES),
+    extraTypesByChat: extraTypes(env, 'EXTRA_TYPES_BY_CHAT'),
     authDir: env.WWEBJS_AUTH_DIR || '.wwebjs_auth',
     fakeFixtures: env.BRIDGE_FAKE_FIXTURES || '',
     recordDir: env.RECORD_DIR || '',

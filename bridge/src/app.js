@@ -1,17 +1,19 @@
 // Wiring: adapter events -> filter -> webhook, plus the HTTP server. No I/O setup here
 // (that is main.js), so tests build the whole bridge around a fake adapter.
-import { chatIdOf, toContract } from './filter.js';
+import { chatIdOf, createAllowlist, toContract } from './filter.js';
 import { createServer } from './server.js';
 
 export function createBridge(cfg, wa, { log = () => {}, webhook, recorder = null, now } = {}) {
   const stats = { forwarded: 0, dropped: {} };
+  // One allowlist for both paths, so webhook and history forward exactly the same messages.
+  const allow = createAllowlist({ base: cfg.contentTypes, extraByChat: cfg.extraTypesByChat });
 
   // One incoming WhatsApp message -> webhook, if it is collectable content.
   async function forward(msg) {
     try {
       if (recorder) recorder.message(msg);
       const chatId = chatIdOf(msg);
-      const res = toContract(msg, wa.chatInfoById(chatId));
+      const res = toContract(msg, wa.chatInfoById(chatId), allow);
       if (!res.message) {
         stats.dropped[res.drop] = (stats.dropped[res.drop] || 0) + 1;
         return { dropped: res.drop };
@@ -33,6 +35,7 @@ export function createBridge(cfg, wa, { log = () => {}, webhook, recorder = null
   const server = createServer(cfg, wa, {
     log,
     now,
+    allow,
     onHistory: recorder ? (chatId, chat, raw) => recorder.history(chatId, chat, raw) : undefined,
     onChats: recorder ? (list) => recorder.chats(list) : undefined,
   });

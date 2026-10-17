@@ -15,8 +15,10 @@ function tsOf(msg) {
  * @param {number} p.minFetch  first window size floor
  * @param {number} p.maxFetch  window size ceiling
  * @param {object} [p.chatInfo] passed to toContract (channel invite code)
+ * @param {Function} [p.allow]   type allowlist passed to toContract (see createAllowlist)
  */
-export async function historyWindow({ fetchLatest, since, limit, minFetch, maxFetch, chatInfo = {} }) {
+export async function historyWindow({ fetchLatest, since, limit, minFetch, maxFetch, chatInfo = {},
+                                      allow }) {
   // Start small (fewer loadEarlierMsgs round-trips to WhatsApp) and double only when the
   // window doesn't reach back to `since` yet.
   let m = Math.min(Math.max(2 * limit, minFetch), maxFetch);
@@ -47,7 +49,7 @@ export async function historyWindow({ fetchLatest, since, limit, minFetch, maxFe
   const messages = [];
   for (const msg of sorted) {
     if (tsOf(msg) < since) continue;
-    const res = toContract(msg, chatInfo);
+    const res = toContract(msg, chatInfo, allow);
     if (res.message) messages.push(res.message);
     else dropped[res.drop] = (dropped[res.drop] || 0) + 1;
   }

@@ -31,6 +31,8 @@ Then in the root `.env`: `BRIDGE_URL=http://127.0.0.1:8002` (the mock stays on 8
 | `HISTORY_MIN_INTERVAL` | 0 s | history calls closer than this get `429` + `Retry-After` (quiet mode) |
 | `OP_TIMEOUT_MS` | 8000 | slower WhatsApp Web operations answer `504`; keep below the collector's `REQUEST_TIMEOUT` |
 | `PRESENCE_UNAVAILABLE` | 1 | after `ready`, tell WhatsApp the device is offline |
+| `CONTENT_TYPES` | see below | comma list replacing the default type allowlist (rarely needed) |
+| `EXTRA_TYPES_BY_CHAT` | empty | JSON: extra types for single groups/channels, e.g. `{"1203…@g.us": ["location"]}`; direct chat ids are refused |
 | `RECORD_DIR` | empty | save raw responses as a fixture (gitignored; private data, redact before committing) |
 | `BRIDGE_FAKE_FIXTURES` | empty | serve a fixture directory instead of WhatsApp |
 
@@ -72,6 +74,10 @@ Whitelist by `type`: `chat`, `image`, `video`, `audio`, `ptt`, `document`, `stic
 `notification_template`, `call_log`, `revoked`, `protocol`, `ciphertext`, …, plus any new type
 WhatsApp adds), `vcard` / `multi_vcard` (phone numbers), `location` (coordinates), status
 (`status@broadcast`), direct chats, and text messages without text.
+
+The allowlist is a hook (`createAllowlist` in `src/filter.js`), used by both the history and the
+webhook path. `EXTRA_TYPES_BY_CHAT` opens a type for one chat only. It forwards the type and caption
+but not type-specific fields: a `location` arrives as `type: "location"` without coordinates.
 
 ## Read-only
 

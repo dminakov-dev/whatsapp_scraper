@@ -70,6 +70,11 @@ secret in `.env`. `--no-pseudonymize` exists for our own research exports.
 ## Post-homework TODO (not now)
 - **Location and contact cards.** The bridge whitelist drops `location`, `vcard` and `multi_vcard`
   (coordinates, phone numbers). Collecting them would need explicit fields and a privacy review.
+- **Per-chat content types.** The hook exists: `CONTENT_TYPES` / `EXTRA_TYPES_BY_CHAT` in the
+  bridge (`createAllowlist`, empty by default) let e.g. `location` through for one chat. Today it
+  forwards only the type and caption. Using it for real means mapping the type's fields
+  (coordinates, vCard) into the model extension below, with the same masking and
+  pseudonymization rules.
 - **Group admins.** Record `groupMetadata.participants` with `isAdmin` per group (who controls a
   group is useful OSINT context).
 - **Author display name.** Record `pushname` / `notifyName` per message next to the author id.

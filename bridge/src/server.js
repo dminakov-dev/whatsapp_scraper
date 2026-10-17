@@ -52,8 +52,10 @@ function intParam(params, name, def, min, max) {
  * @param {() => number} [opts.now]  ms clock, injectable for tests
  * @param {(chatId: string, chat: object, raw: object[]) => void} [opts.onHistory]  recorder hook
  * @param {(chats: object[]) => void} [opts.onChats]  recorder hook
+ * @param {Function} [opts.allow]  content-type allowlist (filter.js createAllowlist)
  */
-export function createServer(cfg, wa, { log = () => {}, now = Date.now, onHistory, onChats } = {}) {
+export function createServer(cfg, wa, { log = () => {}, now = Date.now, onHistory, onChats,
+                                        allow } = {}) {
   let busy = false;          // one WhatsApp Web operation at a time
   let lastHistoryAt = null;  // ms, for HISTORY_MIN_INTERVAL
 
@@ -153,6 +155,7 @@ export function createServer(cfg, wa, { log = () => {}, now = Date.now, onHistor
         minFetch: cfg.historyMinFetch,
         maxFetch: cfg.historyMaxFetch,
         chatInfo: wa.chatInfo(chat),
+        allow,
       });
     });
     log('info', 'history served', { chat_id: chatId, since, limit, returned: page.messages.length,

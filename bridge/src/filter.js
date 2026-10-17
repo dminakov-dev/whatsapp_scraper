@@ -10,6 +10,22 @@ export const CONTENT_TYPES = new Set([
   'chat', 'image', 'video', 'audio', 'ptt', 'document', 'sticker', 'poll_creation',
 ]);
 
+/**
+ * Allowlist hook: which types pass for which chat.
+ * @param {object} [opts]
+ * @param {Iterable<string>} [opts.base]        types allowed in every chat (default CONTENT_TYPES)
+ * @param {Object<string, string[]>} [opts.extraByChat]  extra types for single chats only,
+ *        e.g. { "1203...@g.us": ["location"] }; empty by default
+ * @returns {(chatId: string, type: string) => boolean}
+ */
+export function createAllowlist({ base = CONTENT_TYPES, extraByChat = {} } = {}) {
+  const baseSet = new Set(base);
+  const extra = new Map(Object.entries(extraByChat).map(([chat, types]) => [chat, new Set(types)]));
+  return (chatId, type) => baseSet.has(type) || Boolean(extra.get(chatId)?.has(type));
+}
+
+const defaultAllow = createAllowlist();
+
 export function chatKind(jid) {
   if (typeof jid !== 'string' || jid === '') return 'unknown';
   if (jid === 'status@broadcast' || jid.endsWith('@broadcast')) return 'status';
@@ -42,9 +58,10 @@ export function chatIdOf(msg) {
  * whatsapp-web.js Message -> bridge contract message, or a drop reason.
  * @param {object} msg
  * @param {object} [chatInfo] optional per-chat extras, e.g. { inviteCode } for channels
+ * @param {(chatId: string, type: string) => boolean} [allow] see createAllowlist()
  * @returns {{message: object} | {drop: string}}
  */
-export function toContract(msg, chatInfo = {}) {
+export function toContract(msg, chatInfo = {}, allow = defaultAllow) {
   if (!msg || typeof msg !== 'object') return { drop: 'not_an_object' };
   const id = serialized(msg.id);
   const chatId = chatIdOf(msg);
@@ -55,7 +72,7 @@ export function toContract(msg, chatInfo = {}) {
   if (kind === 'direct') return { drop: 'direct' };
   if (kind !== 'group' && kind !== 'channel') return { drop: `chat_${kind}` };
 
-  if (!CONTENT_TYPES.has(msg.type)) return { drop: `type_${msg.type || 'missing'}` };
+  if (!allow(chatId, msg.type)) return { drop: `type_${msg.type || 'missing'}` };
 
   // whatsapp-web.js puts the caption of a media message in `body` ('' when there is none).
   const body = typeof msg.body === 'string' && msg.body !== '' ? msg.body : null;
