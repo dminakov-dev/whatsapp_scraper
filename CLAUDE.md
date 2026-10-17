@@ -142,3 +142,5 @@ WhatsApp is low-volume: the lecturer's production WhatsApp collector had only 32
 
 ## Lessons learned
 (Add short entries here whenever we hit something non-obvious, so we don't step on the same rake twice.)
+- 2026-10-17 — `INSERT OR IGNORE` ignores *every* constraint (NOT NULL, CHECK), not only UNIQUE: a row with a NULL field silently disappears. We use `INSERT ... ON CONFLICT(chat_id, message_id) DO NOTHING` instead — same dedup, but other violations raise and roll back the transaction.
+- 2026-10-17 — The docs folder is named `docs ` (trailing space). `.gitignore` lists both `docs /` and `docs/`.
