@@ -35,6 +35,10 @@ class Config:
 
     # Messages requested per backfill call ("one run = a small batch")
     batch_size: int = 50
+    # How long a caught-up target rests before it is polled again
+    target_interval: float = 60.0
+    # Re-sync the target list from chat membership every N ticks
+    sync_every: int = 10
 
 
 def _get(name: str, default, cast):
@@ -74,9 +78,13 @@ def load_config(env_file: str | None = ".env") -> Config:
         backoff_max=_get("BACKOFF_MAX", d.backoff_max, float),
         request_timeout=_get("REQUEST_TIMEOUT", d.request_timeout, float),
         batch_size=_get("BATCH_SIZE", d.batch_size, int),
+        target_interval=_get("TARGET_INTERVAL", d.target_interval, float),
+        sync_every=_get("SYNC_EVERY", d.sync_every, int),
     )
     if cfg.batch_size == 0:
         raise ConfigError("BATCH_SIZE must be at least 1")
+    if cfg.sync_every == 0:
+        raise ConfigError("SYNC_EVERY must be at least 1")
     if cfg.backoff_max < cfg.backoff_base:
         raise ConfigError("BACKOFF_MAX must be >= BACKOFF_BASE")
     return cfg

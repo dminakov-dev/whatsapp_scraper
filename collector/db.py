@@ -199,6 +199,16 @@ def active_targets(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+def make_all_due(conn: sqlite3.Connection) -> int:
+    """Startup gap-fill: every active target becomes due now, then the normal paced loop
+    walks them one per tick. Returns how many targets were scheduled."""
+    with conn:
+        cur = conn.execute(
+            "UPDATE targets SET next_run_at = NULL WHERE enabled = 1 AND status = 'active'"
+        )
+    return cur.rowcount
+
+
 def mark_retry(conn: sqlite3.Connection, chat_id: str, error: str, next_run_at: str) -> int:
     """Target-level transient failure (409 / 5xx / timeout). Returns the new fail_count."""
     with conn:
