@@ -20,20 +20,55 @@
 - `README.md` — architecture, data model, cursor and error policies, CLI usage.
 
 ## Status (replace, don't append)
-- Talkman SIM active (stays in the main phone, only for SMS). WhatsApp registered on a separate old Android phone as primary device: clean install, no restored backup, contacts permission denied, backup off, neutral profile, 2FA PIN on. Subscribing manually to 3–5 public channels; account warming until Phase 2 (~2026-10-19).
-- Phase 1 done (2026-10-17): collector (`db`, `models`, `source`, `receiver`, `backfill`, `export`, `targets` CLI), `bridge_mock` with fault injection, README draft.
-- Phase 2 bridge built 2026-10-17, **not linked yet**: `bridge/` (whatsapp-web.js 1.34.7, Node 25 OK), 57 Node tests + `tests/test_bridge_contract.py` against handwritten fixtures (243 pytest); review fixes 2026-10-17: collector hardening, allowlist hook, `truncated` signal. Plan for 2026-10-18: first link in quiet mode (webhook only, then slow channel backfill), `RECORD_DIR` → redact → rerun contract tests on recorded fixtures; confirm channel `message` events, invite code, `serverId`.
-- Not done: live link, sample data, REPORT.md. `account_events` so far holds **mock data only** — not usable as observed limits.
+- Talkman SIM active (stays in the main phone, only for SMS). WhatsApp registered on a separate old Android phone as primary device: clean install, no restored backup, contacts permission denied, backup off, neutral profile, 2FA PIN on. Subscribing manually to 3–5 public channels.
+- Phase 1 done: collector, `bridge_mock`, README. Phase 2 bridge built and tested on handwritten fixtures, **never linked yet**. External review fixed 2026-10-17 (collector hardening, privacy masking, export pseudonymization, allowlist hook, `truncated` signal). Tests: 243 pytest, 57 Node. Everything pushed to the private repo `dminakov-dev/whatsapp_scrpr` (main @ `6be9ded` + this file).
+- **Next: first real link 2026-10-18 — follow the runbook below step by step, report after each stage.**
+- Not done: live link, sample data, REPORT.md. `account_events` holds **mock data only** — not usable as observed limits.
+
+## Runbook: first real link (2026-10-18)
+**0. One-time `.env`** (root; does not exist yet; the bridge reads it via `../.env`). Start from `.env.example`, then set:
+`BRIDGE_URL=http://127.0.0.1:8002`, `BRIDGE_TOKEN=<openssl rand -hex 32>`, `PSEUDONYM_SALT=<openssl rand -hex 32>`, `RECORD_DIR=fixtures/recorded`, and quiet-mode bridge settings `HISTORY_MIN_FETCH=20`, `HISTORY_MAX_FETCH=100`, `HISTORY_MIN_INTERVAL=90`, `PRESENCE_UNAVAILABLE=1`. Never print the token or salt in chat.
+
+**1. Start order** (each in its own terminal, from the repo root):
+1. `.venv/bin/python -m collector.receiver` — receiver first, so no webhook is lost.
+2. `cd bridge && npm start` — bridge on 127.0.0.1:8002; first run prints a QR.
+3. **No backfill process yet** (stage A is webhook only).
+
+**2. Link:** the old phone → WhatsApp → Linked devices → Link a device → scan the terminal QR. Wait for log `state CONNECTED` and `presence set to unavailable`. Check:
+`set -a; . ./.env; set +a; curl -s -H "X-Bridge-Token: $BRIDGE_TOKEN" http://127.0.0.1:8002/health` → `{"ok":true,"state":"CONNECTED"}`. Then `curl … /chats` once: only `@g.us` / `@newsletter`, groups carry `announce`.
+
+**3. Stage A — webhook only (a few hours).** Leave receiver + bridge running; watch `logs/receiver.log` and the bridge log. Expect channel posts / group messages stored with `via='webhook'`.
+
+**4. Stage B — slow channel backfill.**
+- Sync targets without fetching history, then switch groups off (sync keeps `enabled`):
+  `.venv/bin/python -c "from collector.config import load_config; from collector.source import BridgeClient; from collector import db; c=load_config(); s=BridgeClient(c.bridge_url, token=c.bridge_token); print(db.sync_targets(db.connect(c.db_path), s.list_chats()))"`
+  then `.venv/bin/python -m collector.targets list` and `… targets disable <group id>` for every `@g.us`.
+- Run the worker slowly: `BATCH_SIZE=10 TICK_SLEEP=120 JITTER=60 TARGET_INTERVAL=1800 SYNC_EVERY=30 .venv/bin/python -m collector.backfill`
+  (`HISTORY_MIN_INTERVAL=90` < `TICK_SLEEP`, so the bridge's 429 is only a safety net; a 429 pauses the whole loop). Groups only later, after Dima's OK.
+
+**5. Live-validation checklist** (record each result in `docs/report-notes.md`):
+- [ ] group delivery: a group message arrives via webhook with `author` (often `@lid`);
+- [ ] channel delivery: does `message` fire for channel posts, or do they arrive only via backfill?
+- [ ] id consistency: the same message via webhook and history has the same `id`. Check no near-duplicates: `SELECT chat_id, date, text, COUNT(*) FROM messages GROUP BY 1,2,3 HAVING COUNT(*) > 1` must be empty;
+- [ ] channel permalink: is `channelMetadata.inviteCode` (or `inviteLink`) / `_data.serverId` present? Are URLs `https://whatsapp.com/channel/…` or still `wa://…`?
+- [ ] `truncated`: with `HISTORY_MAX_FETCH=100` the first channel backfill likely logs `history_truncated`; otherwise `history_start` (query in `docs/report-notes.md`);
+- [ ] receiver outage: stop the receiver (Ctrl+C), let posts arrive (bridge logs `event lost`), restart it, let backfill run → the missed posts appear `via='backfill'`, no duplicates, no unexpected `possible_gap`.
+
+**6. Recorded fixtures.** The bridge writes raw responses to `bridge/fixtures/recorded/session.json` (gitignored: real text, member ids, `_data`). Then:
+- run the same contract tests on them: `cd bridge && CONTRACT_FIXTURES=fixtures/recorded npm test` and `CONTRACT_FIXTURES=bridge/fixtures/recorded .venv/bin/python -m pytest -q tests/test_bridge_contract.py`; fix only the bridge if they fail;
+- to commit any of it: write a small redaction script first (replace person JIDs everywhere including inside message ids, blank group texts, keep channel posts), save the result OUTSIDE `recorded/` (e.g. `bridge/fixtures/live/`), review it with Dima, and only then commit.
+
+**7. Stop and ask Dima before continuing if:**
+- any ban/restriction sign: the phone shows a warning, "account restricted / banned", logged out unexpectedly, captcha or verification request;
+- unexpected `401` / `UNPAIRED` / `CONFLICT` after linking, repeated `disconnected`, or a state you don't recognize;
+- anything that could send, react, mark as read, change presence to online or join (including a library option or upgrade that might do it implicitly), or any need to touch the read-only guard;
+- direct-chat data showing up anywhere (logs, DB, recorded fixtures);
+- the whatsapp-web.js / WhatsApp Web version needs changing, or Puppeteer fails on Node 25 (try Node 22/24 LTS only after asking).
 
 ## Phases
 1. ~~Phase 1 — Python logic against `bridge_mock/`.~~ Done.
-2. **Phase 2 — real bridge** (`bridge/`, Node.js, whatsapp-web.js). Check current whatsapp-web.js docs first. Swap by `BRIDGE_URL` only; Python must not change. Checklist:
-   - ~~implement the contract below exactly; contract test on handwritten fixtures~~ done; record real responses (`RECORD_DIR`) and rerun the same contract tests on them;
-   - forward only content messages: drop `status@broadcast` and system types (`e2e_notification`, `gp2`, `notification_template`, `call_log`, `revoked`, …) — otherwise they arrive as empty "media" rows or `malformed_payload` noise;
-   - find out whether channel `invite_code` / `server_id` are available (else URLs stay `wa://…`);
-   - group `fetchMessages` is unreliable → expect small windows and `possible_gap` events.
-   - **live validation on first link** (reviewer's list): group message delivery; channel post delivery (does `message` fire for channels?); same `id` for one message via webhook and via history; channel permalink (invite code + `serverId` → `https://whatsapp.com/channel/…`); recovery after a receiver outage (stop receiver, wait for posts, restart → backfill fills the gap, no duplicates).
-3. **Phase 3 — deliverables:** ≥ 200 records from public channels (`python -m collector.export --chat-type channel`), review for private data, REPORT.md from real `account_events`.
+2. **Phase 2 — real bridge** (`bridge/`). Built; remaining: the runbook above. Never adapt the collector to the bridge; hardening the collector on its own is fine (separate commit, a test per fix). Group `fetchMessages` is unreliable → expect small windows and `possible_gap` events.
+3. **Phase 3 — deliverables:** ≥ 200 records from public channels (`python -m collector.export --chat-type channel`, pseudonymized by default), review for private data, REPORT.md from real `account_events`.
 4. **Phase 4 — bonuses** (optional): Docker Compose, stats dashboard.
 
 **Decision point 2026-10-20:** if the real bridge isn't linked and collecting by then, add a fallback public-source adapter (public Telegram channel or RSS) for submission: a new class implementing `Source` in `collector/source.py` (`health`, `list_chats`, `fetch_history` → `CanonicalMessage`). db / dedup / cursor / backfill code must not change.
