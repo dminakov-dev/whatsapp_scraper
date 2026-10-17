@@ -91,6 +91,21 @@ Bonus idea: an FTS5 full-text index over `text` (the lecturer's `results.*` tabl
 
 `account_events` (optional, for health / bonus): `ts`, `kind` (disconnected, auth_failure, rate_limited, bridge_error…), `detail`.
 
+## Bridge error contract (the real Node bridge in Phase 2 MUST answer this way)
+The collector classifies errors only by HTTP status (`collector/source.py: classify()`), so the bridge must map WhatsApp failures onto these codes:
+
+| Code | Meaning on the bridge side | Collector scope → action |
+|---|---|---|
+| 400 | our request is malformed (bad `since`/`limit`, bad path) — a bug on **our** side | loop-level: pause whole loop with backoff, `bad_request` event, targets untouched |
+| 401 | WhatsApp session logged out / unpaired, or wrong bridge API key | loop-level: pause, `auth_failure` event |
+| 403 / 404 / 410 | chat not accessible / no longer a member / chat gone | target-level: skip (reversible via `python -m collector.targets reenable`) |
+| 409 | client busy (WhatsApp Web loading/reconnecting) | target-level: retry later with backoff |
+| 429 | rate limited | loop-level: pause, honor `Retry-After` (seconds or HTTP date), never a skip |
+| 5xx / timeout | bridge or WhatsApp Web failure | target-level: retry with exponential backoff + jitter |
+| unreachable | bridge process down | loop-level: pause, `disconnected` event |
+
+`GET /health` must return 200 `{"ok": true, "state": "CONNECTED"}` only when the session is usable; otherwise 401 (or 200 with `ok: false` and the whatsapp-web.js state).
+
 **URL scheme:** WhatsApp group messages have no public permalink. Channel posts may (`https://whatsapp.com/channel/<invite_code>/<server_id>`) when the data is available. Otherwise use a synthetic stable id: `wa://<chat_id>/<message_id>`. Document this in the report.
 
 ## Rules (non-negotiable)
@@ -98,7 +113,7 @@ Bonus idea: an FTS5 full-text index over `text` (the lecturer's `results.*` tabl
 - **Skip direct (1:1) chats by default** — collect only groups/channels that are explicit targets. Collect the minimum needed.
 - **Advance a cursor only after the DB commit succeeds.**
 - **Pacing:** backfill one chat per tick, sleep with jitter between requests.
-- **Error handling (as in the lecture):** 4xx except 409 → mark target permanently skipped; 409 / 5xx / timeout → exponential backoff with jitter, retry later. One bad chat or a malformed event must never crash the process.
+- **Error handling (refined from the lecture):** 403/404/410 → skip the target (reversible, reason kept in `last_error`); 409 / 5xx / timeout → exponential backoff with jitter, retry later; 400 / 401 / 429 / bridge down → pause the whole loop, never touch targets. See "Bridge error contract". One bad chat or a malformed event must never crash the process.
 - **Secrets:** `.env` only, with `.env.example` committed. Never commit `.env`, `.wwebjs_auth/`, `.wwebjs_cache/`, `data/*.db`, or raw exports with private group content. Add these to `.gitignore` from the very first commit.
 - Sample data for submission: prefer **public channels**; review it for private persons' data before committing.
 

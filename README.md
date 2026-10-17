@@ -140,15 +140,31 @@ Errors are classified by **scope**, as in the lecture's account-health logic:
 
 | Signal | Scope | Action |
 |---|---|---|
-| 404 / 410 / 403 / 400 on a chat | chat | target marked `skipped` permanently |
+| 403 / 404 / 410 on a chat | chat | target marked `skipped` (reversible, see below) |
 | 409, 5xx, read timeout, invalid body | chat | retry that chat later, exponential backoff + jitter |
 | 429 | account | pause the **whole** loop for `Retry-After` (or backoff); never a skip |
 | 401, bridge unreachable, `/health` not OK | account | pause the whole loop; per-chat state untouched |
+| 400 | our request | our own bug, not the chat's fault: pause the whole loop, `bad_request` event, targets untouched |
 | webhook: malformed payload | — | `200` (retrying garbage is pointless), logged |
 | webhook: database error | — | `500`, so the bridge may retry (safe thanks to dedup) |
 
 `/health` is checked before every tick. Any unexpected exception is logged as
 `worker_error`, and the loop keeps going.
+
+The full bridge error contract (what each code means on the bridge side) is in
+[`CLAUDE.md`](CLAUDE.md#bridge-error-contract-the-real-node-bridge-in-phase-2-must-answer-this-way).
+
+### Managing targets
+
+A skip is never final. Its reason is kept in `last_error`, and a chat can be put back in
+rotation. Re-enabling resumes from the chat's existing cursor.
+
+```bash
+.venv/bin/python -m collector.targets list --skipped     # skipped chats and why
+.venv/bin/python -m collector.targets reenable CHAT_ID   # one chat
+.venv/bin/python -m collector.targets reenable --all     # every skipped/disabled chat
+.venv/bin/python -m collector.targets disable CHAT_ID    # switch a synced chat off
+```
 
 Useful query for the report:
 
@@ -170,6 +186,7 @@ collector/
   receiver.py   FastAPI webhook (live path)
   backfill.py   paced backfill / gap-fill worker (pull path)
   export.py     SQLite -> JSONL
+  targets.py    CLI: list / re-enable / disable targets
 bridge_mock/    fake bridge: same contract, history window, fault injection
 tests/          pytest
 ```

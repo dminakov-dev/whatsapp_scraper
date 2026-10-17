@@ -26,7 +26,7 @@ GROUP = "120363111111111111@g.us"
     (409, RetryableError, None),
     (500, RetryableError, None),
     (503, RetryableError, None),
-    (400, TargetError, None),
+    (400, AccountError, "bad_request"),
     (403, TargetError, None),
     (404, TargetError, None),
     (410, TargetError, None),
@@ -41,8 +41,9 @@ def test_classify(status, error_type, kind):
             assert error.kind == kind
 
 
-def test_429_never_becomes_a_permanent_skip():
-    assert not isinstance(classify(429, {"Retry-After": "5"}, "x"), TargetError)
+@pytest.mark.parametrize("status", [400, 409, 429, 500])
+def test_never_a_permanent_skip(status):
+    assert not isinstance(classify(status, {"Retry-After": "5"}, "x"), TargetError)
 
 
 def test_parse_retry_after_seconds_and_http_date():

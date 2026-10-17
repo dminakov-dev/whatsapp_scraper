@@ -199,6 +199,38 @@ def active_targets(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+def list_targets(conn: sqlite3.Connection, *, status: str | None = None) -> list[sqlite3.Row]:
+    sql, params = "SELECT * FROM targets", ()
+    if status:
+        sql, params = sql + " WHERE status = ?", (status,)
+    return conn.execute(sql + " ORDER BY status DESC, chat_id", params).fetchall()
+
+
+def reenable_targets(conn: sqlite3.Connection, chat_id: str | None = None) -> int:
+    """Undo a skip (or a manual disable): the target becomes active, enabled, due now,
+    with a clean failure history. chat_id=None re-enables every skipped/disabled target.
+    The cursor is kept, so collection resumes where it stopped. Returns rows changed."""
+    sql = """
+        UPDATE targets SET status = 'active', enabled = 1, fail_count = 0,
+                           last_error = NULL, next_run_at = NULL, updated_at = ?
+        WHERE (status = 'skipped' OR enabled = 0)
+    """
+    params: tuple = (now_iso(),)
+    if chat_id is not None:
+        sql += " AND chat_id = ?"
+        params += (chat_id,)
+    with conn:
+        return conn.execute(sql, params).rowcount
+
+
+def disable_target(conn: sqlite3.Connection, chat_id: str) -> bool:
+    """Manually switch a synced chat off (enabled = 0). Returns False if it doesn't exist."""
+    with conn:
+        cur = conn.execute("UPDATE targets SET enabled = 0, updated_at = ? WHERE chat_id = ?",
+                           (now_iso(), chat_id))
+    return cur.rowcount == 1
+
+
 def make_all_due(conn: sqlite3.Connection) -> int:
     """Startup gap-fill: every active target becomes due now, then the normal paced loop
     walks them one per tick. Returns how many targets were scheduled."""

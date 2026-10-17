@@ -4,8 +4,8 @@ One tick = health check -> (periodic) membership sync -> ONE due target -> one s
 batch from its cursor -> insert + advance cursor in one transaction -> sleep with jitter.
 
 Failures by scope (see collector/source.py):
-- AccountError  (401, 429, bridge down): pause the whole loop; targets are not touched
-- TargetError   (404/410/403/400):       skip that target permanently
+- AccountError  (400, 401, 429, bridge down): pause the whole loop; targets are not touched
+- TargetError   (403/404/410):              skip that target (reversible: python -m collector.targets)
 - RetryableError(409, 5xx, timeout):     retry that target later with exponential backoff
 Any other exception is logged and the loop continues: one bad chat never kills the run.
 """
@@ -48,7 +48,7 @@ class Worker:
         self.rng = rng or random.Random()
         self.sleep = sleep
         self.clock = clock
-        self.account_failures = 0   # consecutive account-level failures (drives the pause)
+        self.account_failures = 0   # consecutive loop-level failures (drives the pause)
         self.ticks = 0
 
     # --- helpers --------------------------------------------------------------------
@@ -64,7 +64,7 @@ class Worker:
         pause = min(pause, self.cfg.backoff_max)
         # No status_code here: the request event already carries it (avoids double counting).
         db.log_event(self.conn, "cooldown", f"{exc.kind}: {exc.detail}; pausing {pause:.1f}s")
-        log.warning("account-level failure (%s): %s — pausing whole loop for %.1fs",
+        log.warning("loop-level failure (%s): %s — pausing whole loop for %.1fs",
                     exc.kind, exc.detail, pause)
         return TickResult("paused", pause=pause, detail=exc.kind)
 

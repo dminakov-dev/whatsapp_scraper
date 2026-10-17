@@ -266,3 +266,41 @@ def test_failed_membership_sync_keeps_existing_targets(h):
     h.faults.fail_5xx = 1.0                # /chats answers 503
     h.worker.sync()                        # must not raise
     assert [t["chat_id"] for t in db.active_targets(h.conn)] == before
+
+
+# --- HTTP 400: our request is malformed -> loop-level, never a skip -------------------------
+
+def test_400_pauses_loop_logs_event_and_leaves_targets_untouched(conn):
+    def bridge(request):
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"ok": True, "state": "CONNECTED"})
+        if request.url.path == "/chats":
+            return httpx.Response(200, json={"chats": [{"chat_id": GROUP, "name": "g"}]})
+        return httpx.Response(400, json={"error": "invalid 'since' parameter"})
+
+    source = BridgeClient("http://bridge", recorder=lambda *a, **k: db.log_event(conn, *a, **k),
+                          client=httpx.Client(transport=httpx.MockTransport(bridge)))
+    worker = Worker(Config(jitter=0, backoff_base=1), conn, source, rng=random.Random(0),
+                    sleep=lambda s: None)
+    worker.start()
+    first, second = worker.tick(), worker.tick()
+
+    assert first.status == second.status == "paused" and first.detail == "bad_request"
+    assert second.pause > first.pause                          # backoff keeps growing
+    target = db.get_target(conn, GROUP)
+    assert (target["status"], target["enabled"], target["fail_count"]) == ("active", 1, 0)
+    kinds = [r["kind"] for r in conn.execute("SELECT kind FROM account_events")]
+    assert "bad_request" in kinds and "cooldown" in kinds
+    assert "target_skipped" not in kinds
+
+
+def test_skipped_target_can_be_reenabled_and_resumes_from_cursor(h):
+    h.drain()
+    assert h.target(DEAD)["status"] == "skipped"
+    db.reenable_targets(h.conn, DEAD)
+    target = h.target(DEAD)
+    assert (target["status"], target["fail_count"], target["next_run_at"]) == ("active", 0, None)
+    # the chat is still gone on the bridge, so the next attempt skips it again — visibly
+    h.drain()
+    assert h.target(DEAD)["status"] == "skipped"
+    assert len(h.events("target_skipped")) == 2

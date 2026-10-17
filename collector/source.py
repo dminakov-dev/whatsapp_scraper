@@ -5,11 +5,13 @@ types. A different source (public Telegram channel, RSS) would be another class 
 same methods; db / dedup / cursor / backfill logic would not change.
 
 Error scope (mirrors the lecture's release() classification):
-- TargetError     this chat is permanently unreadable (400/403/404/410)  -> skip target
+- TargetError     this chat is not accessible (403/404/410)              -> skip target
 - RetryableError  this request failed transiently (409, 5xx, read timeout, bad body)
                                                                          -> retry target later
-- AccountError    the account/bridge as a whole is unusable (401, 429, unreachable)
-                                                                         -> pause the whole loop
+- AccountError    loop-level: the account/bridge is unusable (401, 429, unreachable) or our
+                  own request is malformed (400, a bug on our side)      -> pause the whole loop
+A 400 is not the chat's fault, so it must never skip a target: pausing makes the bug
+visible in account_events instead of silently disabling chats one by one.
 """
 import logging
 import time
@@ -47,12 +49,12 @@ class RetryableError(SourceError):
 
 
 class AccountError(SourceError):
-    """The whole account / bridge is unusable right now."""
+    """Loop-level: the account / bridge is unusable, or our request itself is wrong."""
 
     def __init__(self, detail: str, status_code: int | None = None, *,
                  kind: str, retry_after: float | None = None):
         super().__init__(detail, status_code)
-        self.kind = kind                # auth_failure | rate_limited | disconnected
+        self.kind = kind                # auth_failure | rate_limited | disconnected | bad_request
         self.retry_after = retry_after  # seconds, from Retry-After when the bridge sent it
 
 
@@ -89,6 +91,8 @@ def classify(status: int, headers: httpx.Headers | dict, detail: str) -> SourceE
     """HTTP status -> error type (None for success). Pure function, easy to test."""
     if status < 400:
         return None
+    if status == 400:
+        return AccountError(detail, status, kind="bad_request")
     if status == 401:
         return AccountError(detail, status, kind="auth_failure")
     if status == 429:
