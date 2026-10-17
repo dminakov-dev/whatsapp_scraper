@@ -159,8 +159,9 @@ export function createServer(cfg, wa, { log = () => {}, now = Date.now, onHistor
       });
     });
     log('info', 'history served', { chat_id: chatId, since, limit, returned: page.messages.length,
-                                    ...page.stats });
-    return [200, { messages: page.messages, oldest_available: page.oldest_available }];
+                                    truncated: page.truncated, ...page.stats });
+    return [200, { messages: page.messages, oldest_available: page.oldest_available,
+                   truncated: page.truncated }];
   }
 
   async function route(req, url) {

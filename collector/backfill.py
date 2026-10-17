@@ -146,7 +146,8 @@ class Worker:
 
         self.account_failures = 0
         self._check_gap(chat_id, cursor, page.oldest_available)
-        note = self._report_dropped(chat_id, page)
+        truncation = self._check_truncated(chat_id, cursor, since, page)
+        note = "; ".join(n for n in (truncation, self._report_dropped(chat_id, page)) if n) or None
         full = page.raw_count >= limit
 
         if self._progressed(page, cursor):
@@ -211,6 +212,24 @@ class Worker:
             detail = f"cursor {cursor} is older than oldest available {oldest}"
             db.log_event(self.conn, "possible_gap", detail, chat_id=chat_id)
             log.warning("%s: possible gap — %s", chat_id, detail)
+
+    def _check_truncated(self, chat_id: str, cursor: str | None, since: str | None,
+                         page) -> str | None:
+        """Data quality: record how far back a chat's history reaches, and every time the
+        source says its window was cut short. Applies to the very first collection too
+        (no cursor yet), where _check_gap can't help. Returns a note for last_error."""
+        if page.truncated:
+            detail = (f"history window truncated by the source: requested from "
+                      f"{since or 'the beginning'}, oldest available {page.oldest_available}; "
+                      f"older messages were not collected")
+            db.log_event(self.conn, "history_truncated", detail, chat_id=chat_id)
+            log.warning("%s: %s", chat_id, detail)
+            return "history incomplete (window truncated)"
+        if cursor is None and page.oldest_available is not None:
+            db.log_event(self.conn, "history_start",
+                         f"first collection: history available from {page.oldest_available}",
+                         chat_id=chat_id)
+        return None
 
     # --- main loop ------------------------------------------------------------------
 

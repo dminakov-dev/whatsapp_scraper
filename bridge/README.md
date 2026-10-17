@@ -48,6 +48,8 @@ Then in the root `.env`: `BRIDGE_URL=http://127.0.0.1:8002` (the mock stays on 8
   and returns the **oldest** `limit`. M starts at `max(2·limit, HISTORY_MIN_FETCH)` and doubles
   while the window doesn't reach `since` (each step is a `loadEarlierMsgs` round-trip to
   WhatsApp). `oldest_available` is the oldest timestamp in the window, system messages included.
+  `truncated` is true when the window hit `HISTORY_MAX_FETCH` before reaching `since` while
+  WhatsApp still had older messages (false when the chat simply has nothing older).
 - **Webhook.** The `message` event (incoming only; `message_create` would add our own) goes
   through the same filter as history, so both paths produce identical messages.
 - **Ids.** `id._serialized` everywhere; `chat_id` is `id.remote`.

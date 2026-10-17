@@ -20,6 +20,7 @@ class Chat:
     invite_code: str | None = None
     messages: list[dict] = field(default_factory=list)
     next_server_id: int = 1
+    lost: int = 0          # messages pushed out of the history window (no longer fetchable)
 
 
 def default_chats() -> list[Chat]:
@@ -71,6 +72,7 @@ class World:
     def add(self, chat: Chat, msg: dict) -> None:
         chat.messages.append(msg)
         if len(chat.messages) > self.window:
+            chat.lost += len(chat.messages) - self.window
             del chat.messages[: len(chat.messages) - self.window]
 
     def _seed_history(self, count: int, now: int) -> None:
@@ -95,9 +97,12 @@ class World:
 
     # --- queries --------------------------------------------------------------------
 
-    def history(self, chat_id: str, since: int, limit: int) -> tuple[list[dict], int | None]:
-        """Messages with timestamp >= since, oldest first, at most `limit`."""
+    def history(self, chat_id: str, since: int,
+                limit: int) -> tuple[list[dict], int | None, bool]:
+        """Messages with timestamp >= since, oldest first, at most `limit`; the oldest
+        timestamp held; and whether the window cut off messages between `since` and it."""
         chat = self.chats[chat_id]
         matching = [dict(m) for m in chat.messages if m["timestamp"] >= since]
         oldest = chat.messages[0]["timestamp"] if chat.messages else None
-        return matching[:limit], oldest
+        truncated = chat.lost > 0 and oldest is not None and since < oldest
+        return matching[:limit], oldest, truncated

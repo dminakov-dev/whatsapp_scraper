@@ -7,8 +7,11 @@ Chats    GET /chats             -> {"chats": [{"chat_id": str, "name": str}, ...
 History  GET /chats/{id}/messages?since=<unix>&limit=N   (N = 1..500)
                                 -> {"messages": [<Message>, ...]  (timestamp >= since, oldest first:
                                     the OLDEST N after since, never the newest N),
-                                    "oldest_available": int | null}  (oldest timestamp the bridge
+                                    "oldest_available": int | null,  (oldest timestamp the bridge
                                     still holds; history is a window, older messages are gone)
+                                    "truncated": bool}  optional: true when the source's own
+                                    window cap stopped before `since` although older messages
+                                    exist; absent = unknown
 Webhook  POST /webhook          {"event": "message", "message": <Message>}
                                 {"event": "state", "state": "DISCONNECTED" | "UNPAIRED" | ...}
          The bridge sends header X-Bridge-Token when BRIDGE_TOKEN is configured.

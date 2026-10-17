@@ -135,8 +135,8 @@ def create_app(settings: MockSettings, world: World | None = None) -> FastAPI:
         chat = world.chats.get(chat_id)
         if chat is None or chat.dead:
             return JSONResponse({"error": "chat not found"}, status_code=404)
-        msgs, oldest = world.history(chat_id, since, limit)
-        return {"messages": msgs, "oldest_available": oldest}
+        msgs, oldest, truncated = world.history(chat_id, since, limit)
+        return {"messages": msgs, "oldest_available": oldest, "truncated": truncated}
 
     # --- test/demo controls (bound to 127.0.0.1 like everything else) ------------------
 

@@ -24,6 +24,7 @@ export async function historyWindow({ fetchLatest, since, limit, minFetch, maxFe
   let m = Math.min(Math.max(2 * limit, minFetch), maxFetch);
   let raw = [];
   let fetches = 0;
+  let truncated = false;
   for (;;) {
     const got = await fetchLatest(m);
     fetches += 1;
@@ -32,7 +33,13 @@ export async function historyWindow({ fetchLatest, since, limit, minFetch, maxFe
     const stamps = raw.map(tsOf).filter((t) => t !== null);
     const oldest = stamps.length ? Math.min(...stamps) : null;
     const exhausted = raw.length < m;          // the chat has nothing older to load
-    if (exhausted || oldest === null || oldest <= since || !grew || m >= maxFetch) break;
+    if (exhausted || oldest === null || oldest <= since || !grew) break;
+    if (m >= maxFetch) {
+      // Our cap, not WhatsApp's: older messages exist but this window won't fetch them.
+      // Reported as `truncated` so the collector records it instead of assuming completeness.
+      truncated = true;
+      break;
+    }
     m = Math.min(m * 2, maxFetch);
   }
 
@@ -56,6 +63,7 @@ export async function historyWindow({ fetchLatest, since, limit, minFetch, maxFe
   return {
     messages: messages.slice(0, limit),
     oldest_available: oldestAvailable,
+    truncated,
     stats: { fetched: raw.length, window: m, fetches, dropped },
   };
 }

@@ -221,6 +221,64 @@ def test_cursor_older_than_window_logs_possible_gap(conn):
     assert len(gaps) == 1 and gaps[0]["chat_id"] == GROUP
 
 
+# --- review fix 1: truncated history is reported, also on the first collection ---------------
+
+def test_first_collection_of_a_truncated_window_is_reported(conn):
+    h = Harness(conn, window=100, history=150)       # 50 messages per chat already lost
+    h.drain()
+    truncated = {e["chat_id"] for e in h.events("history_truncated")}
+    assert GROUP in truncated and CHANNEL in truncated
+    assert all("oldest available" in e["detail"] for e in h.events("history_truncated"))
+    # Still collected everything the window holds, and the cursor moved on.
+    assert h.count(GROUP) == 100 and h.target()["cursor_ts"] is not None
+    assert not h.events("possible_gap")              # no cursor yet: only the explicit signal
+
+
+def test_complete_first_collection_records_where_history_starts(conn):
+    h = Harness(conn, window=20, history=20)          # nothing lost
+    h.drain()
+    assert not h.events("history_truncated")
+    starts = [e for e in h.events("history_start") if e["chat_id"] == GROUP]
+    assert len(starts) == 1 and "history available from" in starts[0]["detail"]
+
+
+def test_truncation_with_an_existing_cursor_is_reported_too(conn):
+    h = Harness(conn, window=20, history=20, batch_size=50)
+    h.drain()
+    chat = h.world.chats[GROUP]
+    for i in range(30):                               # 30 new > window of 20
+        h.world.add(chat, h.world.new_message(chat, NOW + 100 + i))
+    db.make_all_due(conn)
+    h.drain()
+    assert [e["chat_id"] for e in h.events("history_truncated")] == [GROUP]
+    assert h.events("possible_gap")                   # both facts recorded
+
+
+def test_truncated_flag_sets_a_note_on_the_target(conn):
+    fb = FakeBridge(conn)
+    fb.add(NOW)
+    fb.extra = {"truncated": True, "oldest_available": NOW}
+    fb.worker.start()
+    assert fb.worker.tick().status == "ok"
+    assert fb.target()["last_error"] == "history incomplete (window truncated)"
+    assert fb.events("history_truncated")
+
+
+@pytest.mark.parametrize("value, expected", [(True, True), (False, False), ("yes", None),
+                                             (1, None)])
+def test_truncated_field_is_parsed_strictly(conn, value, expected):
+    fb = FakeBridge(conn)
+    fb.add(NOW)
+    fb.extra = {"truncated": value}
+    assert fb.source.fetch_history(GROUP, None, 10).truncated is expected
+
+
+def test_source_without_truncated_field_is_unknown_not_complete(conn):
+    fb = FakeBridge(conn)
+    fb.add(NOW)
+    assert fb.source.fetch_history(GROUP, None, 10).truncated is None
+
+
 # --- resilience ------------------------------------------------------------------------------
 
 def test_unexpected_exception_does_not_stop_the_loop(h, monkeypatch):
@@ -316,6 +374,7 @@ class FakeBridge:
     def __init__(self, conn, *, batch_size=50, overlap=600.0, chat_id=GROUP):
         self.conn, self.chat_id, self.store, self.sinces = conn, chat_id, [], []
         self.health_status = 200
+        self.extra = {}                               # extra history-response fields
         self.cfg = Config(batch_size=batch_size, tick_sleep=0, jitter=0, backoff_base=1,
                           backoff_max=300, target_interval=60, backfill_overlap=overlap)
         self.source = BridgeClient("http://bridge", recorder=lambda *a, **k: db.log_event(conn, *a, **k),
@@ -337,7 +396,7 @@ class FakeBridge:
         since, limit = int(request.url.params["since"]), int(request.url.params["limit"])
         self.sinces.append(since)
         page = [m for ts, m in sorted(self.store, key=lambda p: p[0]) if ts >= since][:limit]
-        return httpx.Response(200, json={"messages": page, "oldest_available": None})
+        return httpx.Response(200, json={"messages": page, "oldest_available": None, **self.extra})
 
     def ids(self):
         return {r[0] for r in self.conn.execute("SELECT message_id FROM messages")}

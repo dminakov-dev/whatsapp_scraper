@@ -44,6 +44,7 @@ test('group history: content only, oldest first, ids are id._serialized', async 
                    ['chat', 'image', 'ptt', 'poll_creation', 'document', 'chat', 'sticker', 'chat']);
   assert.ok(r.body.messages.every((m) => m.id.startsWith(`false_${GROUP}_`)));
   assert.equal(r.body.oldest_available, 1792000000);  // the e2e notification still counts
+  assert.equal(r.body.truncated, false);
   assert.ok(!JSON.stringify(r.body).includes('VCARD'));
 });
 
@@ -58,6 +59,17 @@ test('channel history: invite code and server id attached', async () => {
 test('direct chat or status history is 400 (our bug), never 403', async () => {
   assert.equal((await b.get(`/chats/${enc(DIRECT)}/messages`)).status, 400);
   assert.equal((await b.get(`/chats/${enc('status@broadcast')}/messages`)).status, 400);
+});
+
+test('a capped window is reported as truncated', async () => {
+  const capped = await startBridge({ env: { HISTORY_MIN_FETCH: '5', HISTORY_MAX_FETCH: '10' } });
+  try {
+    const r = await capped.get(`/chats/${enc(CHANNEL)}/messages?since=0&limit=2`);
+    assert.equal(r.body.truncated, true);       // 42 posts, the cap is 10
+    assert.equal(r.body.messages.length, 2);
+  } finally {
+    await capped.close();
+  }
 });
 
 test('unknown group is 404; bad params are 400', async () => {

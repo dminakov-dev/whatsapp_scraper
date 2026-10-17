@@ -90,3 +90,27 @@ test('stops growing when WhatsApp has nothing older to give', async () => {
   assert.deepEqual(fetches, [30, 60]);
   assert.equal(page.messages.length, 5);
 });
+
+// --- truncated: our cap stopped the window before `since` ----------------------------------
+
+test('truncated when the window is capped before reaching since', async () => {
+  const page = await run(chat(1000), T0, 5);              // needs 1000, cap is 400
+  assert.equal(page.truncated, true);
+});
+
+test('not truncated when the chat simply has nothing older (exhausted)', async () => {
+  const page = await run(chat(7), 0, 50);
+  assert.equal(page.truncated, false);
+});
+
+test('not truncated when the window reaches since', async () => {
+  const page = await run(chat(300), T0 + 100 * 60, 5);
+  assert.equal(page.truncated, false);
+});
+
+test('not truncated when WhatsApp stops giving older messages below the cap', async () => {
+  const msgs = Array.from({ length: 30 }, (_, i) => post(i, T0 + 1000 + i));
+  const page = await historyWindow({ fetchLatest: async (m) => msgs.slice(0, Math.min(30, m)),
+                                     since: 0, limit: 5, minFetch: 30, maxFetch: 400 });
+  assert.equal(page.truncated, false);
+});

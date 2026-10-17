@@ -58,6 +58,7 @@ test(`[${path.basename(DIR)}] full history: valid messages, oldest first, oldest
   for (const { chat_id: chatId } of chats) {
     const r = await b.get(`/chats/${enc(chatId)}/messages?since=0&limit=500`);
     assert.equal(r.status, 200, chatId);
+    assert.equal(typeof r.body.truncated, 'boolean', `${chatId} truncated flag`);
     const stamps = r.body.messages.map((m) => m.timestamp);
     assert.deepEqual(stamps, [...stamps].sort((x, y) => x - y), `${chatId} oldest first`);
     r.body.messages.forEach((m) => checkMessage(m, chatId));

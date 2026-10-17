@@ -33,3 +33,14 @@ Every bridge response is one event with its status code; derived events (`cooldo
 SELECT kind, status_code, COUNT(*) AS n, CAST(AVG(latency_ms) AS INT) AS avg_ms
 FROM account_events GROUP BY kind, status_code ORDER BY n DESC;
 ```
+
+Data completeness per chat (how far back history reached, and where it was cut or has gaps):
+
+```sql
+SELECT chat_id, kind, ts, detail FROM account_events
+WHERE kind IN ('history_start', 'history_truncated', 'possible_gap')
+ORDER BY chat_id, ts;
+```
+`history_start` = first collection reached back to this date (complete as far as WhatsApp
+goes); `history_truncated` = the source's window cap stopped earlier, older messages exist but
+were not collected; `possible_gap` = messages between our cursor and the window edge are gone.

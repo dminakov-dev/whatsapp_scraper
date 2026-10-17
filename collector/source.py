@@ -72,6 +72,9 @@ class HistoryPage:
     # not only accepted messages, so a run of malformed messages can't freeze it.
     newest: str | None = field(default=None)
     future: int = 0                     # of `dropped`: dated later than now + tolerance
+    # True: the source's window cap stopped before `since` although older messages exist.
+    # None: the source doesn't say (the contract field is optional).
+    truncated: bool | None = None
 
 
 class Source(Protocol):
@@ -245,4 +248,5 @@ class BridgeClient:
             oldest_available=iso_from_unix(oldest) if isinstance(oldest, (int, float)) else None,
             newest=iso_from_unix(max(reached)) if reached else None,
             future=future,
+            truncated=body["truncated"] if isinstance(body.get("truncated"), bool) else None,
         )

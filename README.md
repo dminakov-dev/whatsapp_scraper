@@ -174,6 +174,11 @@ The schema is created idempotently at startup, so there is no migration step.
 - **Continuity check:** the bridge reports `oldest_available` (history is a window of the latest
   messages). If that is newer than our cursor, messages in between are gone, and a `possible_gap`
   event is recorded.
+- **Truncated history:** a source may say its own window cap stopped before `since` although
+  older messages exist (`truncated: true`; the bridge sets it when `HISTORY_MAX_FETCH` is hit).
+  The worker records `history_truncated` and notes it on the target, also on the very first
+  collection when there is no cursor yet. The cursor still moves on, so the chat is never
+  stuck, but the loss is on record. A complete first collection records `history_start`.
 - **Stuck cursor:** if a full batch makes no progress (more than a batch shares one second, or
   the messages have no readable timestamp), the worker retries once with a 4× batch. If that
   still stays in the same second, it steps over that second and records `stuck_cursor`. If no
