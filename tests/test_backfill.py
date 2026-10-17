@@ -1,4 +1,5 @@
 import random
+import time
 
 import httpx
 import pytest
@@ -11,7 +12,8 @@ from collector import db
 from collector.backfill import Worker
 from collector.config import Config
 from collector.models import normalize
-from collector.source import BridgeClient
+from collector.source import AccountError, BridgeClient
+from collector.timeutil import iso_from_unix, now_iso, parse_iso
 
 NOW = 1_760_700_000
 GROUP = "120363111111111111@g.us"
@@ -304,3 +306,190 @@ def test_skipped_target_can_be_reenabled_and_resumes_from_cursor(h):
     h.drain()
     assert h.target(DEAD)["status"] == "skipped"
     assert len(h.events("target_skipped")) == 2
+
+
+# --- review regressions: a contract-following fake bridge -----------------------------------
+# Each stored message has a true position in time used for ordering and `since` filtering,
+# while its payload `timestamp` may be garbage. This is how a real bridge would see it.
+
+class FakeBridge:
+    def __init__(self, conn, *, batch_size=50, overlap=600.0, chat_id=GROUP):
+        self.conn, self.chat_id, self.store, self.sinces = conn, chat_id, [], []
+        self.health_status = 200
+        self.cfg = Config(batch_size=batch_size, tick_sleep=0, jitter=0, backoff_base=1,
+                          backoff_max=300, target_interval=60, backfill_overlap=overlap)
+        self.source = BridgeClient("http://bridge", recorder=lambda *a, **k: db.log_event(conn, *a, **k),
+                                   client=httpx.Client(transport=httpx.MockTransport(self.handle)))
+        self.worker = Worker(self.cfg, conn, self.source, rng=random.Random(0), sleep=lambda s: None)
+
+    def add(self, true_ts, **payload):
+        msg = {"id": f"m{len(self.store)}", "chat_id": self.chat_id, "author": "111@lid",
+               "timestamp": true_ts, "body": "hi", "type": "chat"}
+        msg.update(payload)
+        self.store.append((true_ts, msg))
+        return msg["id"]
+
+    def handle(self, request):
+        if request.url.path == "/health":
+            return httpx.Response(self.health_status, json={"ok": True, "state": "CONNECTED"})
+        if request.url.path == "/chats":
+            return httpx.Response(200, json={"chats": [{"chat_id": self.chat_id, "name": "g"}]})
+        since, limit = int(request.url.params["since"]), int(request.url.params["limit"])
+        self.sinces.append(since)
+        page = [m for ts, m in sorted(self.store, key=lambda p: p[0]) if ts >= since][:limit]
+        return httpx.Response(200, json={"messages": page, "oldest_available": None})
+
+    def ids(self):
+        return {r[0] for r in self.conn.execute("SELECT message_id FROM messages")}
+
+    def target(self):
+        return db.get_target(self.conn, self.chat_id)
+
+    def events(self, kind):
+        return self.conn.execute("SELECT * FROM account_events WHERE kind=?", (kind,)).fetchall()
+
+
+# finding 1: pagination follows the raw page, not only accepted messages
+
+def test_full_page_of_malformed_messages_is_stepped_over_and_reported(conn):
+    fb = FakeBridge(conn, batch_size=50)
+    for i in range(50):
+        fb.add(NOW + i, author=None)                  # malformed but readable timestamps
+    good = {fb.add(NOW + 100 + i) for i in range(20)}
+    fb.worker.start()
+    first = fb.worker.tick()
+    assert first.status == "ok" and first.inserted == 0
+    t = fb.target()
+    assert t["cursor_ts"] == "2025-10-17T11:20:49Z"    # moved past the malformed block
+    assert "50 malformed" in t["last_error"]
+    assert fb.events("dropped_messages")
+    fb.worker.run(until_idle=True, max_ticks=20)
+    assert fb.ids() == good
+    assert len(fb.sinces) < 10                         # no re-fetching the same page forever
+
+
+def test_full_page_without_readable_timestamps_escalates_and_gets_past_it(conn):
+    fb = FakeBridge(conn, batch_size=50)
+    for i in range(50):
+        fb.add(NOW + i, timestamp="oops")             # no position can be read from these
+    good = {fb.add(NOW + 100 + i) for i in range(70)}
+    fb.worker.start()
+    assert fb.worker.tick().inserted == 70            # bigger batch reached readable messages
+    assert fb.ids() == good
+
+
+def test_unreadable_page_backs_off_with_visible_error_instead_of_hot_looping(conn):
+    fb = FakeBridge(conn, batch_size=50)
+    for i in range(250):                              # more than limit * STUCK_LIMIT_FACTOR
+        fb.add(NOW + i, timestamp="oops")
+    fb.worker.start()
+    result = fb.worker.tick()
+    t = fb.target()
+    assert result.status == "retry"
+    assert t["fail_count"] == 1 and "no readable timestamp" in t["last_error"]
+    assert t["next_run_at"] > now_iso() and t["cursor_ts"] is None
+    assert fb.events("unreadable_page")
+    assert db.pick_due_target(conn) is None           # not picked again right away
+
+
+# finding 2: future-dated messages never move the cursor
+
+def test_future_dated_message_never_moves_the_cursor(conn):
+    fb = FakeBridge(conn)
+    base = int(time.time()) - 7200
+    fb.add(base)
+    future_id = fb.add(int(time.time()) + 30 * 86400)
+    fb.worker.start()
+    fb.worker.tick()
+    assert fb.target()["cursor_ts"] == iso_from_unix(base)
+    assert future_id not in fb.ids()
+    assert fb.events("future_timestamp")
+
+    later = fb.add(base + 100)                        # a normal message arrives afterwards
+    db.make_all_due(conn)
+    fb.worker.run(until_idle=True, max_ticks=10)
+    assert later in fb.ids()
+    assert fb.target()["cursor_ts"] == iso_from_unix(base + 100)
+
+
+# finding 3: overlap picks up late-delivered messages
+
+def test_late_delivered_message_inside_overlap_is_collected(conn):
+    fb = FakeBridge(conn, overlap=600)
+    for i in range(5):
+        fb.add(NOW + i * 60)
+    fb.worker.start()
+    fb.worker.run(until_idle=True, max_ticks=10)
+    cursor = int(parse_iso(fb.target()["cursor_ts"]).timestamp())
+    late = fb.add(cursor - 120)                       # sent offline, stamped 2 min before cursor
+    db.make_all_due(conn)
+    fb.worker.run(until_idle=True, max_ticks=10)
+    assert late in fb.ids()
+    assert cursor - 600 in fb.sinces                  # the request started at cursor - overlap
+    assert fb.target()["cursor_ts"] == iso_from_unix(cursor)   # cursor did not move back
+
+
+def test_without_overlap_a_late_message_is_missed(conn):
+    """Documents why the overlap exists: with 0 the same late message is never fetched."""
+    fb = FakeBridge(conn, overlap=0)
+    for i in range(5):
+        fb.add(NOW + i * 60)
+    fb.worker.start()
+    fb.worker.run(until_idle=True, max_ticks=10)
+    late = fb.add(NOW + 4 * 60 - 120)
+    db.make_all_due(conn)
+    fb.worker.run(until_idle=True, max_ticks=10)
+    assert late not in fb.ids()
+
+
+def test_overlap_window_denser_than_a_batch_still_makes_progress(conn):
+    fb = FakeBridge(conn, batch_size=5, overlap=600)
+    ids = {fb.add(NOW + i) for i in range(40)}        # 40 messages inside one overlap window
+    fb.worker.start()
+    fb.worker.run(until_idle=True, max_ticks=50)
+    assert fb.ids() == ids
+    assert fb.target()["cursor_ts"] == iso_from_unix(NOW + 39)
+    assert len(fb.sinces) < 40
+
+
+# finding 5: Retry-After honored in full, with a floor and a sanity cap
+
+def pause_worker(conn, **cfg):
+    config = Config(jitter=0, backoff_base=1, backoff_max=300, retry_after_max=3600, **cfg)
+    return Worker(config, conn, source=None, rng=random.Random(0), sleep=lambda s: None)
+
+
+def rate_limited(seconds):
+    return AccountError("429", 429, kind="rate_limited", retry_after=seconds)
+
+
+def test_retry_after_longer_than_backoff_max_is_honored(conn):
+    assert pause_worker(conn)._account_pause(rate_limited(900)).pause == 900
+
+
+def test_retry_after_zero_cannot_busy_loop(conn):
+    worker = pause_worker(conn)
+    pauses = [worker._account_pause(rate_limited(0)).pause for _ in range(3)]
+    assert pauses == [1, 2, 4]                        # our own growing backoff is the floor
+
+
+def test_absurd_retry_after_is_capped_and_logged(conn):
+    assert pause_worker(conn)._account_pause(rate_limited(7200)).pause == 3600
+    assert conn.execute("SELECT COUNT(*) FROM account_events "
+                        "WHERE kind='retry_after_capped'").fetchone()[0] == 1
+
+
+# finding 7: a failing /health pauses the loop with growing backoff
+
+def test_failing_health_check_pauses_loop_with_growing_backoff(conn):
+    fb = FakeBridge(conn)
+    fb.add(NOW)
+    fb.worker.start()
+    fb.health_status = 503
+    first, second = fb.worker.tick(), fb.worker.tick()
+    assert first.status == second.status == "paused" and first.detail == "bridge_unhealthy"
+    assert second.pause > first.pause and fb.worker.account_failures == 2
+    assert fb.events("bridge_unhealthy") and not fb.events("worker_error")
+    assert fb.target()["fail_count"] == 0 and fb.target()["cursor_ts"] is None
+    fb.health_status = 200
+    assert fb.worker.tick().status == "ok"

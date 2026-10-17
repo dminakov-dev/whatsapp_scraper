@@ -1,12 +1,16 @@
 """Paced backfill / gap-fill worker: the pull path, and the only code that moves cursors.
 
 One tick = health check -> (periodic) membership sync -> ONE due target -> one small
-batch from its cursor -> insert + advance cursor in one transaction -> sleep with jitter.
+batch from (cursor - overlap) -> insert + advance cursor in one transaction -> sleep with jitter.
+
+The cursor follows how far the bridge's page reached (HistoryPage.newest), not only the
+messages we accepted, so malformed messages are stepped over instead of re-fetched forever.
 
 Failures by scope (see collector/source.py):
-- AccountError  (400, 401, 429, bridge down): pause the whole loop; targets are not touched
-- TargetError   (403/404/410):              skip that target (reversible: python -m collector.targets)
-- RetryableError(409, 5xx, timeout):     retry that target later with exponential backoff
+- AccountError  (400/other 4xx, 401, 429, bridge down, /health failing): pause the whole loop;
+                targets are not touched
+- TargetError   (403/404/410):           skip that target (reversible: python -m collector.targets)
+- RetryableError(408, 409, 5xx, timeout): retry that target later with exponential backoff
 Any other exception is logged and the loop continues: one bad chat never kills the run.
 """
 import argparse
@@ -18,14 +22,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from . import db
-from .config import Config, load_config
+from .config import STUCK_LIMIT_FACTOR, Config, load_config
 from .log import setup_logging
 from .source import AccountError, BridgeClient, RetryableError, Source, TargetError
 from .timeutil import iso_after, now_iso
 
 log = logging.getLogger(__name__)
-
-STUCK_LIMIT_FACTOR = 4   # one bigger request before declaring a cursor stuck
 
 
 @dataclass
@@ -60,8 +62,18 @@ class Worker:
 
     def _account_pause(self, exc: AccountError) -> TickResult:
         self.account_failures += 1
-        pause = exc.retry_after if exc.retry_after is not None else self.backoff(self.account_failures)
-        pause = min(pause, self.cfg.backoff_max)
+        own = self.backoff(self.account_failures)
+        if exc.retry_after is None:
+            pause = min(own, self.cfg.backoff_max)
+        else:
+            # Honor Retry-After in full, but never wait less than our own backoff: a
+            # "Retry-After: 0" answered again and again must not become a busy loop.
+            pause = max(exc.retry_after, own)
+            if pause > self.cfg.retry_after_max:
+                db.log_event(self.conn, "retry_after_capped",
+                             f"Retry-After {exc.retry_after:.0f}s capped to "
+                             f"{self.cfg.retry_after_max:.0f}s")
+                pause = self.cfg.retry_after_max
         # No status_code here: the request event already carries it (avoids double counting).
         db.log_event(self.conn, "cooldown", f"{exc.kind}: {exc.detail}; pausing {pause:.1f}s")
         log.warning("loop-level failure (%s): %s — pausing whole loop for %.1fs",
@@ -102,13 +114,19 @@ class Worker:
     def backfill_target(self, target: sqlite3.Row) -> TickResult:
         chat_id, cursor = target["chat_id"], target["cursor_ts"]
         limit = self.cfg.batch_size
+        since = iso_after(-self.cfg.backfill_overlap, cursor) if cursor else None
         try:
-            page = self.source.fetch_history(chat_id, cursor, limit)
-            if self._is_stuck(page, cursor, limit):
+            page = self.source.fetch_history(chat_id, since, limit)
+            if self._no_progress(page, cursor, limit) and since != cursor:
+                # The overlap window alone holds a full batch of already-seen messages.
+                since = cursor
+                page = self.source.fetch_history(chat_id, since, limit)
+            if self._no_progress(page, cursor, limit):
+                # One second, or a run of unreadable messages, is bigger than a batch.
                 limit *= STUCK_LIMIT_FACTOR
-                log.info("%s: batch full within cursor second %s, retrying with limit=%d",
+                log.info("%s: full batch made no progress past %s, retrying with limit=%d",
                          chat_id, cursor, limit)
-                page = self.source.fetch_history(chat_id, cursor, limit)
+                page = self.source.fetch_history(chat_id, since, limit)
         except AccountError as exc:
             return self._account_pause(exc)
         except TargetError as exc:
@@ -127,27 +145,63 @@ class Worker:
 
         self.account_failures = 0
         self._check_gap(chat_id, cursor, page.oldest_available)
+        note = self._report_dropped(chat_id, page)
+        full = page.raw_count >= limit
 
-        new_cursor = page.newest
-        if self._is_stuck(page, cursor, limit):
+        if self._progressed(page, cursor):
+            new_cursor = page.newest
+        elif not full:
+            new_cursor = None                      # caught up: the cursor stays where it is
+        elif page.newest is None:
+            # Even the bigger batch has no readable timestamp to advance to. Re-fetching at
+            # once would loop on the same page, so back off and leave the reason visible.
+            return self._unreadable_page(target, page, limit)
+        else:
             # Even the bigger batch didn't leave this second: step over it and say so.
             new_cursor = iso_after(1, cursor)
             db.log_event(self.conn, "stuck_cursor",
                          f"more than {limit} messages at {cursor}; advanced cursor by 1s",
                          chat_id=chat_id)
 
-        more_pending = page.raw_count >= limit
-        next_run = self.clock() if more_pending else iso_after(self.cfg.target_interval, self.clock())
+        next_run = self.clock() if full else iso_after(self.cfg.target_interval, self.clock())
         rows = [m.as_row() for m in page.messages]
-        inserted = db.insert_and_advance(self.conn, chat_id, rows, new_cursor, next_run)
+        inserted = db.insert_and_advance(self.conn, chat_id, rows, new_cursor, next_run,
+                                         note=note)
         log.info("%s: fetched %d, dropped %d, inserted %d, cursor %s -> %s%s",
-                 chat_id, page.raw_count, page.dropped, inserted, cursor, new_cursor,
-                 " (more pending)" if more_pending else "")
+                 chat_id, page.raw_count, page.dropped, inserted, cursor, new_cursor or cursor,
+                 " (more pending)" if full else "")
         return TickResult("ok", chat_id, inserted=inserted)
 
     @staticmethod
-    def _is_stuck(page, cursor: str | None, limit: int) -> bool:
-        return cursor is not None and page.raw_count >= limit and page.newest == cursor
+    def _progressed(page, cursor: str | None) -> bool:
+        return page.newest is not None and (cursor is None or page.newest > cursor)
+
+    def _no_progress(self, page, cursor: str | None, limit: int) -> bool:
+        return page.raw_count >= limit and not self._progressed(page, cursor)
+
+    def _report_dropped(self, chat_id: str, page) -> str | None:
+        """Log dropped messages as events; return a short note for targets.last_error."""
+        notes = []
+        malformed = page.dropped - page.future
+        if malformed:
+            notes.append(f"{malformed} malformed message(s) dropped")
+            db.log_event(self.conn, "dropped_messages", notes[-1], chat_id=chat_id)
+        if page.future:
+            notes.append(f"{page.future} message(s) dated after now+"
+                         f"{self.cfg.future_tolerance:g}s rejected")
+            db.log_event(self.conn, "future_timestamp", notes[-1], chat_id=chat_id)
+        return "; ".join(notes) or None
+
+    def _unreadable_page(self, target: sqlite3.Row, page, limit: int) -> TickResult:
+        chat_id = target["chat_id"]
+        detail = (f"{page.raw_count} message(s) from {target['cursor_ts'] or 'start'} "
+                  f"have no readable timestamp (limit={limit})")
+        db.log_event(self.conn, "unreadable_page", detail, chat_id=chat_id)
+        attempt = target["fail_count"] + 1
+        delay = self.backoff(attempt)
+        db.mark_retry(self.conn, chat_id, detail, iso_after(delay, self.clock()))
+        log.warning("%s: %s; retry in %.1fs", chat_id, detail, delay)
+        return TickResult("retry", chat_id, detail=detail)
 
     def _check_gap(self, chat_id: str, cursor: str | None, oldest: str | None) -> None:
         """Continuity check: if the bridge no longer holds anything as old as our cursor,
@@ -201,7 +255,8 @@ def main() -> None:
     setup_logging("backfill", cfg.log_dir, cfg.log_level)
     conn = db.connect(cfg.db_path)
     source = BridgeClient(cfg.bridge_url, token=cfg.bridge_token, timeout=cfg.request_timeout,
-                          recorder=lambda *a, **k: db.log_event(conn, *a, **k))
+                          recorder=lambda *a, **k: db.log_event(conn, *a, **k),
+                          future_tolerance=cfg.future_tolerance)
     worker = Worker(cfg, conn, source)
     log.info("backfill worker: bridge=%s db=%s", cfg.bridge_url, cfg.db_path)
     try:

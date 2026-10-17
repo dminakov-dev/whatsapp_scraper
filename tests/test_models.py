@@ -1,7 +1,9 @@
+import time
+
 import pytest
 
 from collector import db
-from collector.models import build_url, chat_type_of, normalize
+from collector.models import build_url, chat_type_of, dated_in_future, normalize
 
 TS = 1_760_700_000  # 2025-10-17T11:20:00Z
 
@@ -87,8 +89,27 @@ def test_canonical_row_fits_the_database(conn):
 def test_unexpected_internal_error_is_dropped_not_raised(monkeypatch):
     import collector.models as models
 
-    def bug(msg, via):
+    def bug(*args):
         raise RuntimeError("bug in our parsing")
 
     monkeypatch.setattr(models, "_to_canonical", bug)
     assert models.normalize(group_msg(), via="webhook") is None
+
+
+# --- review finding 2: dates in the future ------------------------------------------------
+
+def test_date_beyond_future_tolerance_is_rejected():
+    future = int(time.time()) + 3600
+    assert normalize(group_msg(timestamp=future), via="webhook", future_tolerance=300) is None
+    assert dated_in_future(group_msg(timestamp=future), 300)
+
+
+def test_date_within_future_tolerance_is_accepted():
+    soon = int(time.time()) + 60                    # a slightly fast clock is normal
+    assert normalize(group_msg(timestamp=soon), via="webhook", future_tolerance=300) is not None
+    assert not dated_in_future(group_msg(timestamp=soon), 300)
+
+
+def test_dated_in_future_is_false_for_unreadable_timestamps():
+    assert not dated_in_future(group_msg(timestamp="yesterday"), 300)
+    assert not dated_in_future("not a dict", 300)

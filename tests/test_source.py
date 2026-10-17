@@ -30,6 +30,12 @@ GROUP = "120363111111111111@g.us"
     (403, TargetError, None),
     (404, TargetError, None),
     (410, TargetError, None),
+    # review finding 4: only 403/404/410 skip a chat
+    (408, RetryableError, None),           # request timeout: transient
+    (405, AccountError, "bad_request"),    # unexpected 4xx = our bug -> pause the loop
+    (413, AccountError, "bad_request"),
+    (422, AccountError, "bad_request"),
+    (418, AccountError, "bad_request"),
 ])
 def test_classify(status, error_type, kind):
     error = classify(status, {}, "x")
@@ -41,7 +47,7 @@ def test_classify(status, error_type, kind):
             assert error.kind == kind
 
 
-@pytest.mark.parametrize("status", [400, 409, 429, 500])
+@pytest.mark.parametrize("status", [400, 405, 408, 409, 413, 422, 429, 500])
 def test_never_a_permanent_skip(status):
     assert not isinstance(classify(status, {"Retry-After": "5"}, "x"), TargetError)
 
@@ -213,3 +219,69 @@ def test_close_closes_the_http_client():
     client = client_answering(json={})
     client.close()
     assert client.http.is_closed
+
+
+# --- review finding 7: /health failures are loop-level -------------------------------------
+
+def health_client(handler, events):
+    return BridgeClient("http://bridge", recorder=lambda kind, *a, **k: events.append(kind),
+                        client=httpx.Client(transport=httpx.MockTransport(handler)))
+
+
+def raise_read_timeout(request):
+    raise httpx.ReadTimeout("slow", request=request)
+
+
+@pytest.mark.parametrize("handler", [
+    lambda r: httpx.Response(503, json={"error": "loading"}),
+    lambda r: httpx.Response(409, json={"error": "busy"}),
+    lambda r: httpx.Response(404, json={"error": "no such endpoint"}),
+    lambda r: httpx.Response(200, text="<html>not json</html>"),
+    raise_read_timeout,
+], ids=["503", "409", "404", "bad-json", "timeout"])
+def test_failing_health_check_is_an_account_error(handler):
+    events = []
+    with pytest.raises(AccountError) as err:
+        health_client(handler, events).health()
+    assert err.value.kind == "bridge_unhealthy"
+    assert events[-1] == "bridge_unhealthy"
+
+
+# --- review findings 1 and 2: the page position comes from the raw page --------------------
+
+def history_client(messages):
+    def handler(request):
+        return httpx.Response(200, json={"messages": messages, "oldest_available": None})
+    return BridgeClient("http://bridge", client=httpx.Client(transport=httpx.MockTransport(handler)))
+
+
+def raw(i, ts, **overrides):
+    msg = {"id": f"m{i}", "chat_id": GROUP, "author": "111@lid", "timestamp": ts,
+           "body": "hi", "type": "chat"}
+    msg.update(overrides)
+    return msg
+
+
+def test_page_position_includes_dropped_messages_but_not_unreadable_ones():
+    page = history_client([
+        raw(1, NOW),
+        raw(2, NOW + 5, author=None),          # malformed (group without author), readable time
+        raw(3, "garbage"),                     # unreadable time: no position at all
+    ]).fetch_history(GROUP, None, 10)
+    assert [m.message_id for m in page.messages] == ["m1"]
+    assert page.dropped == 2 and page.future == 0
+    assert page.newest == iso_from_unix(NOW + 5)
+
+
+def test_future_dated_messages_are_counted_and_never_become_the_position():
+    import time
+    page = history_client([raw(1, NOW), raw(2, int(time.time()) + 86400)]).fetch_history(GROUP, None, 10)
+    assert [m.message_id for m in page.messages] == ["m1"]
+    assert (page.dropped, page.future) == (1, 1)
+    assert page.newest == iso_from_unix(NOW)
+
+
+def test_messages_of_another_chat_never_become_the_position():
+    page = history_client([raw(1, NOW), raw(2, NOW + 99, chat_id="other@g.us")]).fetch_history(
+        GROUP, None, 10)
+    assert page.newest == iso_from_unix(NOW) and page.dropped == 1

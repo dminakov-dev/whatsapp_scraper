@@ -9,6 +9,12 @@ from dataclasses import dataclass
 from dotenv import load_dotenv
 
 
+# Bridge contract: GET /chats/{id}/messages accepts limit 1..BRIDGE_MAX_LIMIT.
+BRIDGE_MAX_LIMIT = 500
+# A stuck backfill retries once with limit * STUCK_LIMIT_FACTOR, which must stay within the max.
+STUCK_LIMIT_FACTOR = 4
+
+
 class ConfigError(ValueError):
     """A setting is present but has an invalid value."""
 
@@ -31,6 +37,8 @@ class Config:
     jitter: float = 2.0
     backoff_base: float = 1.0
     backoff_max: float = 300.0
+    # Sanity cap for a bridge Retry-After; longer values are capped and logged
+    retry_after_max: float = 3600.0
     request_timeout: float = 10.0
 
     # Messages requested per backfill call ("one run = a small batch")
@@ -39,6 +47,12 @@ class Config:
     target_interval: float = 60.0
     # Re-sync the target list from chat membership every N ticks
     sync_every: int = 10
+    # History is re-read from cursor - overlap, so late-delivered messages (sent offline,
+    # stamped with their original time) are still picked up; dedup absorbs the repeats
+    backfill_overlap: float = 600.0
+    # Message dates later than now + this are rejected: they would push the cursor into
+    # the future, and every later message would then fall behind it
+    future_tolerance: float = 300.0
 
 
 def _get(name: str, default, cast):
@@ -76,15 +90,23 @@ def load_config(env_file: str | None = ".env") -> Config:
         jitter=_get("JITTER", d.jitter, float),
         backoff_base=_get("BACKOFF_BASE", d.backoff_base, float),
         backoff_max=_get("BACKOFF_MAX", d.backoff_max, float),
+        retry_after_max=_get("RETRY_AFTER_MAX", d.retry_after_max, float),
         request_timeout=_get("REQUEST_TIMEOUT", d.request_timeout, float),
         batch_size=_get("BATCH_SIZE", d.batch_size, int),
         target_interval=_get("TARGET_INTERVAL", d.target_interval, float),
         sync_every=_get("SYNC_EVERY", d.sync_every, int),
+        backfill_overlap=_get("BACKFILL_OVERLAP", d.backfill_overlap, float),
+        future_tolerance=_get("FUTURE_TOLERANCE", d.future_tolerance, float),
     )
-    if cfg.batch_size == 0:
-        raise ConfigError("BATCH_SIZE must be at least 1")
+    max_batch = BRIDGE_MAX_LIMIT // STUCK_LIMIT_FACTOR
+    if not 1 <= cfg.batch_size <= max_batch:
+        raise ConfigError(f"BATCH_SIZE must be between 1 and {max_batch} "
+                          f"(x{STUCK_LIMIT_FACTOR} for a stuck cursor must fit the bridge "
+                          f"limit of {BRIDGE_MAX_LIMIT})")
     if cfg.sync_every == 0:
         raise ConfigError("SYNC_EVERY must be at least 1")
     if cfg.backoff_max < cfg.backoff_base:
         raise ConfigError("BACKOFF_MAX must be >= BACKOFF_BASE")
+    if cfg.retry_after_max < cfg.backoff_max:
+        raise ConfigError("RETRY_AFTER_MAX must be >= BACKOFF_MAX")
     return cfg

@@ -41,7 +41,8 @@ def test_blank_value_falls_back_to_default():
     ("BATCH_SIZE", "abc", "not a valid int"),
     ("TICK_SLEEP", "fast", "not a valid float"),
     ("JITTER", "-1", "must not be negative"),
-    ("BATCH_SIZE", "0", "BATCH_SIZE must be at least 1"),
+    ("BATCH_SIZE", "0", "BATCH_SIZE must be between 1 and 125"),
+    ("BATCH_SIZE", "126", "BATCH_SIZE must be between 1 and 125"),
     ("SYNC_EVERY", "0", "SYNC_EVERY must be at least 1"),
 ])
 def test_invalid_values_fail_fast(name, value, message):
@@ -59,3 +60,15 @@ def test_backoff_max_below_base_is_rejected():
 def test_config_is_immutable():
     with pytest.raises(AttributeError):
         Config().batch_size = 1
+
+
+def test_largest_batch_size_still_fits_the_bridge_limit_when_stuck():
+    from collector.config import BRIDGE_MAX_LIMIT, STUCK_LIMIT_FACTOR
+    os.environ["BATCH_SIZE"] = "125"
+    assert load_config(None).batch_size * STUCK_LIMIT_FACTOR <= BRIDGE_MAX_LIMIT
+
+
+def test_retry_after_max_below_backoff_max_is_rejected():
+    os.environ.update(BACKOFF_MAX="600", RETRY_AFTER_MAX="300")
+    with pytest.raises(ConfigError, match="RETRY_AFTER_MAX"):
+        load_config(None)

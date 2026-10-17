@@ -87,10 +87,13 @@ variable. Real environment variables override `.env`. Key settings:
 |---|---|---|
 | `BRIDGE_URL` | `http://127.0.0.1:8001` | the only switch between the mock and the real bridge |
 | `BRIDGE_TOKEN` | empty | shared secret in the `X-Bridge-Token` header (the receiver rejects other requests) |
-| `BATCH_SIZE` | 50 | messages per backfill request ("one run = a small batch") |
+| `BATCH_SIZE` | 50 | messages per backfill request ("one run = a small batch"); 1..125, because the stuck-cursor retry asks for 4× and the bridge accepts at most 500 |
 | `TICK_SLEEP` / `JITTER` | 5 / 2 s | pause between ticks, plus random jitter |
 | `BACKOFF_BASE` / `BACKOFF_MAX` | 1 / 300 s | exponential backoff `base·2^(n-1)`, capped, plus jitter |
 | `TARGET_INTERVAL` | 60 s | how long a caught-up chat waits before it is polled again |
+| `BACKFILL_OVERLAP` | 600 s | history is re-read from `cursor − overlap`, so messages delivered late are still collected |
+| `FUTURE_TOLERANCE` | 300 s | message dates later than now + this are rejected (`future_timestamp` event) |
+| `RETRY_AFTER_MAX` | 3600 s | sanity cap for a bridge `Retry-After`; capping is logged |
 | `MOCK_FAIL_*`, `MOCK_SLOW`, `MOCK_DUPLICATE`, `MOCK_MALFORMED`, `MOCK_AUTH_FAIL` | see file | fault injection in the mock |
 
 Every service binds to `127.0.0.1` only. Logs go to stdout and to rotating files in
@@ -122,17 +125,25 @@ The schema is created idempotently at startup, so there is no migration step.
 
 ## Incrementality and cursors
 
-- The cursor is the timestamp of the newest stored message in a chat. History requests are
-  **inclusive** (`date >= cursor`), so messages that share the boundary second are never lost.
-  The overlap is absorbed by the dedup key.
+- The cursor is the newest timestamp the bridge returned for a chat (counting messages we
+  dropped as malformed, so a run of bad messages is stepped over, not re-fetched forever).
+  Dropped messages are recorded as `dropped_messages` events and in the target's `last_error`.
+- History requests start at **`cursor − BACKFILL_OVERLAP`** and are inclusive. The overlap
+  catches messages that arrive late with an older timestamp (sent while the sender was offline)
+  and messages that share the boundary second. Repeats are absorbed by the dedup key. If the
+  overlap window alone holds a full batch, the worker retries once from the exact cursor.
+- Dates later than now + `FUTURE_TOLERANCE` are rejected on both paths (`future_timestamp`
+  event) and never move the cursor, which only goes forward and could never recover.
 - The cursor advances **in the same transaction** as the insert. If the insert fails, both roll
   back and the next run re-fetches the same range. The cursor never moves backwards.
 - **Continuity check:** the bridge reports `oldest_available` (history is a window of the latest
   messages). If that is newer than our cursor, messages in between are gone, and a `possible_gap`
   event is recorded.
-- **Stuck cursor:** if more than a full batch shares one second, the worker retries once with a
-  bigger batch. If that still fits in the same second, it steps over that second and records
-  `stuck_cursor`.
+- **Stuck cursor:** if a full batch makes no progress (more than a batch shares one second, or
+  the messages have no readable timestamp), the worker retries once with a 4× batch. If that
+  still stays in the same second, it steps over that second and records `stuck_cursor`. If no
+  message has a readable timestamp at all, the chat is retried later with backoff and an
+  `unreadable_page` event, never re-fetched in a tight loop.
 
 ## Limits and errors
 
@@ -141,10 +152,11 @@ Errors are classified by **scope**, as in the lecture's account-health logic:
 | Signal | Scope | Action |
 |---|---|---|
 | 403 / 404 / 410 on a chat | chat | target marked `skipped` (reversible, see below) |
-| 409, 5xx, read timeout, invalid body | chat | retry that chat later, exponential backoff + jitter |
-| 429 | account | pause the **whole** loop for `Retry-After` (or backoff); never a skip |
-| 401, bridge unreachable, `/health` not OK | account | pause the whole loop; per-chat state untouched |
-| 400 | our request | our own bug, not the chat's fault: pause the whole loop, `bad_request` event, targets untouched |
+| 408, 409, 5xx, read timeout, invalid body | chat | retry that chat later, exponential backoff + jitter |
+| 429 | account | pause the **whole** loop for the full `Retry-After`, never shorter than our own backoff (so `Retry-After: 0` can't busy-loop), capped at `RETRY_AFTER_MAX`; never a skip |
+| 401, bridge unreachable | account | pause the whole loop; per-chat state untouched |
+| `/health` failing (5xx, 409, timeout, bad JSON) | account | pause the whole loop with growing backoff, `bridge_unhealthy` event |
+| 400 and any other 4xx | our request | our own bug, not the chat's fault: pause the whole loop, `bad_request` event, targets untouched |
 | webhook: malformed payload | — | `200` (retrying garbage is pointless), logged |
 | webhook: database error | — | `500`, so the bridge may retry (safe thanks to dedup) |
 

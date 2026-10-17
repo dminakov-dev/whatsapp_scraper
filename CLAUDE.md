@@ -98,13 +98,24 @@ The collector classifies errors only by HTTP status (`collector/source.py: class
 |---|---|---|
 | 400 | our request is malformed (bad `since`/`limit`, bad path) — a bug on **our** side | loop-level: pause whole loop with backoff, `bad_request` event, targets untouched |
 | 401 | WhatsApp session logged out / unpaired, or wrong bridge API key | loop-level: pause, `auth_failure` event |
-| 403 / 404 / 410 | chat not accessible / no longer a member / chat gone | target-level: skip (reversible via `python -m collector.targets reenable`) |
-| 409 | client busy (WhatsApp Web loading/reconnecting) | target-level: retry later with backoff |
-| 429 | rate limited | loop-level: pause, honor `Retry-After` (seconds or HTTP date), never a skip |
+| 403 / 404 / 410 | chat not accessible / no longer a member / chat gone | target-level: skip (reversible via `python -m collector.targets reenable`). **Only these three codes skip a chat.** |
+| 408 / 409 | request timed out / client busy (WhatsApp Web loading/reconnecting) | target-level: retry later with backoff |
+| 429 | rate limited | loop-level: pause, honor `Retry-After` (seconds or HTTP date) in full — never shorter than our own backoff, capped only at `RETRY_AFTER_MAX` (1 h, cap logged as `retry_after_capped`); never a skip |
 | 5xx / timeout | bridge or WhatsApp Web failure | target-level: retry with exponential backoff + jitter |
+| any other 4xx (405, 413, 422, …) | not part of the contract → treated as our bug | loop-level: like 400, `bad_request` |
 | unreachable | bridge process down | loop-level: pause, `disconnected` event |
 
-`GET /health` must return 200 `{"ok": true, "state": "CONNECTED"}` only when the session is usable; otherwise 401 (or 200 with `ok: false` and the whatsapp-web.js state).
+`GET /health` must return 200 `{"ok": true, "state": "CONNECTED"}` only when the session is usable; otherwise 401 (or 200 with `ok: false` and the whatsapp-web.js state). Any other failure of `/health` (5xx, 409, timeout, non-JSON) is loop-level: pause with growing backoff, `bridge_unhealthy` event.
+
+### History endpoint contract
+`GET /chats/{chat_id}/messages?since=<unix seconds>&limit=<1..500>`
+
+- **Order and window:** returns messages **oldest → newest, strictly from `since`** (`timestamp >= since`, inclusive). The bridge fetches a window of the last M messages (`fetchMessages({limit: M})`, M ≥ limit), sorts it ascending, filters `>= since`, and returns the **oldest** `limit` of the rest. Never the newest `limit`: `fetchMessages` returns the *latest* N, and returning those would make the collector's cursor jump over the middle silently.
+- **`oldest_available`:** the response always includes `oldest_available` (Unix seconds of the oldest message in the window, or null), so the collector can detect when its cursor fell out of the window (`possible_gap` event).
+- **`limit`** is at most 500 (`BRIDGE_MAX_LIMIT` in `collector/config.py`); `BATCH_SIZE × 4` (the stuck-cursor retry) must fit, so `BATCH_SIZE ≤ 125`.
+- **`message_id` is `id._serialized`** in **both** the webhook event and the history response. It is the dedup key together with `chat_id`; if the two paths used different id forms (`id.id` vs `_serialized`), every message would be stored twice.
+- **`timestamp`** is Unix seconds as WhatsApp reports it. The collector rejects dates later than now + `FUTURE_TOLERANCE` (event `future_timestamp`) and never lets them move the cursor.
+- **Phase 2 must add a contract test with recorded real responses** (fixtures captured from the real bridge: webhook event, history page, `/chats`, `/health` in each state), checked against `collector/models.py` normalization and the order/`since` rules above.
 
 **URL scheme:** WhatsApp group messages have no public permalink. Channel posts may (`https://whatsapp.com/channel/<invite_code>/<server_id>`) when the data is available. Otherwise use a synthetic stable id: `wa://<chat_id>/<message_id>`. Document this in the report.
 
@@ -113,7 +124,7 @@ The collector classifies errors only by HTTP status (`collector/source.py: class
 - **Skip direct (1:1) chats by default** — collect only groups/channels that are explicit targets. Collect the minimum needed.
 - **Advance a cursor only after the DB commit succeeds.**
 - **Pacing:** backfill one chat per tick, sleep with jitter between requests.
-- **Error handling (refined from the lecture):** 403/404/410 → skip the target (reversible, reason kept in `last_error`); 409 / 5xx / timeout → exponential backoff with jitter, retry later; 400 / 401 / 429 / bridge down → pause the whole loop, never touch targets. See "Bridge error contract". One bad chat or a malformed event must never crash the process.
+- **Error handling (refined from the lecture):** 403/404/410 → skip the target (reversible, reason kept in `last_error`); 408 / 409 / 5xx / timeout → exponential backoff with jitter, retry later; 400 and any other unexpected 4xx / 401 / 429 / bridge down / failing `/health` → pause the whole loop, never touch targets. See "Bridge error contract". One bad chat or a malformed event must never crash the process.
 - **Secrets:** `.env` only, with `.env.example` committed. Never commit `.env`, `.wwebjs_auth/`, `.wwebjs_cache/`, `data/*.db`, or raw exports with private group content. Add these to `.gitignore` from the very first commit.
 - Sample data for submission: prefer **public channels**; review it for private persons' data before committing.
 
@@ -154,9 +165,13 @@ WhatsApp is low-volume: the lecturer's production WhatsApp collector had only 32
 ## Status
 - Spare number: **Talkman SIM bought 2026-10-16, not activated yet.** Plan: second WhatsApp account on the Android phone, two-step verification PIN on, neutral profile.
 - 2026-10-17: **Phase 1 done** — collector (db, models, source adapter, receiver, backfill, export), bridge_mock with fault injection, 113 tests, README draft. Bridge contract lives in `collector/models.py`.
+- 2026-10-17: review fixes — cursor follows the raw page (malformed messages are stepped over), future dates rejected, history re-read with `BACKFILL_OVERLAP`, stricter 4xx classification, full `Retry-After`, loop-level `/health` failures, `BATCH_SIZE ≤ 125`; history endpoint contract added above.
 - Next step: Phase 2 (real Node bridge) once the number is activated; decision point 2026-10-20.
 
 ## Lessons learned
 (Add short entries here whenever we hit something non-obvious, so we don't step on the same rake twice.)
 - 2026-10-17 — `INSERT OR IGNORE` ignores *every* constraint (NOT NULL, CHECK), not only UNIQUE: a row with a NULL field silently disappears. We use `INSERT ... ON CONFLICT(chat_id, message_id) DO NOTHING` instead — same dedup, but other violations raise and roll back the transaction.
 - 2026-10-17 — The docs folder is named `docs ` (trailing space). `.gitignore` lists both `docs /` and `docs/`.
+- 2026-10-17 — Derive the cursor from what the source *returned*, not only from what we *accepted*. Otherwise a full page of malformed messages freezes the cursor and the same page is re-fetched forever. Messages with no readable timestamp can't give a position at all: escalate the batch once, then back off with a visible `last_error`.
+- 2026-10-17 — A monotonic cursor (`MAX`) makes any future-dated value permanent: one bad date and every later message falls behind the cursor. Validate dates (≤ now + tolerance) *before* they reach the cursor.
+- 2026-10-17 — Message timestamps are send time, not arrival order: a message sent offline arrives later with an older timestamp. A timestamp cursor needs an overlap (`since = cursor − overlap`); dedup absorbs the repeats. If the overlap window alone holds a full batch, retry once from the exact cursor.

@@ -21,7 +21,7 @@ from fastapi.responses import JSONResponse
 from . import db
 from .config import Config, load_config
 from .log import setup_logging
-from .models import normalize
+from .models import DEFAULT_FUTURE_TOLERANCE, dated_in_future, normalize
 
 log = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ def create_app(cfg: Config) -> FastAPI:
             log.exception("webhook: cannot open database")
             return JSONResponse({"ok": False, "error": "storage unavailable"}, status_code=500)
         try:
-            return handle_event(conn, body)
+            return handle_event(conn, body, future_tolerance=cfg.future_tolerance)
         except sqlite3.Error:
             log.exception("webhook: database error, asking the bridge to retry")
             return JSONResponse({"ok": False, "error": "storage error"}, status_code=500)
@@ -68,7 +68,8 @@ def create_app(cfg: Config) -> FastAPI:
     return app
 
 
-def handle_event(conn: sqlite3.Connection, body: bytes) -> JSONResponse:
+def handle_event(conn: sqlite3.Connection, body: bytes, *,
+                 future_tolerance: float = DEFAULT_FUTURE_TOLERANCE) -> JSONResponse:
     """Process one webhook body. Raises only sqlite3.Error (-> 500)."""
     try:
         event = json.loads(body)
@@ -93,8 +94,12 @@ def handle_event(conn: sqlite3.Connection, body: bytes) -> JSONResponse:
         log.info("webhook: ignoring unknown event type %r", kind)
         return _ignored("unknown event")
 
-    msg = normalize(event.get("message"), via="webhook")
+    raw = event.get("message")
+    msg = normalize(raw, via="webhook", future_tolerance=future_tolerance)
     if msg is None:
+        if dated_in_future(raw, future_tolerance):
+            db.log_event(conn, "future_timestamp", f"{str(event)[:200]}")
+            return _ignored("future timestamp")
         db.log_event(conn, "malformed_payload", f"{str(event)[:200]}")
         return _ignored("malformed message")
 

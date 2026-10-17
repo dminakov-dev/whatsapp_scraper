@@ -124,3 +124,11 @@ def test_database_cannot_be_opened_returns_500(client, monkeypatch):
 
 def test_health_endpoint(client):
     assert client.get("/health").json() == {"ok": True}
+
+
+def test_future_dated_message_is_ignored_with_its_own_event(client, cfg):
+    import time
+    response = client.post("/webhook", json=message(timestamp=int(time.time()) + 86400))
+    assert response.status_code == 200 and response.json()["ignored"] == "future timestamp"
+    assert count(cfg) == 0
+    assert count(cfg, "SELECT COUNT(*) FROM account_events WHERE kind='future_timestamp'") == 1

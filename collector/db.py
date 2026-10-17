@@ -121,11 +121,13 @@ def insert_and_advance(
     rows: list[Mapping[str, Any]],
     new_cursor: str | None,
     next_run_at: str | None,
+    note: str | None = None,
 ) -> int:
     """Backfill path: insert rows and advance the target's cursor in ONE transaction.
 
     If anything fails, the whole transaction rolls back and the cursor stays where it
     was, so the next run re-fetches the same range (dedup absorbs any overlap).
+    `note` becomes last_error (e.g. "3 malformed message(s) dropped"); None clears it.
     """
     with conn:
         inserted = _insert_rows(conn, rows)
@@ -138,11 +140,11 @@ def insert_and_advance(
                 backfill_count = backfill_count + ?,
                 next_run_at    = ?,
                 fail_count     = 0,
-                last_error     = NULL,
+                last_error     = ?,
                 updated_at     = ?
             WHERE chat_id = ?
             """,
-            (new_cursor, new_cursor, inserted, next_run_at, now_iso(), chat_id),
+            (new_cursor, new_cursor, inserted, next_run_at, note, now_iso(), chat_id),
         )
     return inserted
 
@@ -257,7 +259,8 @@ def mark_retry(conn: sqlite3.Connection, chat_id: str, error: str, next_run_at: 
 
 
 def mark_skipped(conn: sqlite3.Connection, chat_id: str, error: str) -> None:
-    """Target-level permanent failure (404 / 410 / 403 / 400): stop trying this chat."""
+    """Target-level failure (403 / 404 / 410): stop trying this chat until it is re-enabled
+    with `python -m collector.targets reenable`. The reason stays in last_error."""
     with conn:
         conn.execute(
             "UPDATE targets SET status = 'skipped', last_error = ?, updated_at = ? "
