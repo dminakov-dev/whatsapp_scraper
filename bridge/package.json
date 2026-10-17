@@ -1,0 +1,20 @@
+{
+  "name": "wa-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Thin read-only WhatsApp bridge (whatsapp-web.js) implementing the collector's bridge contract",
+  "type": "module",
+  "main": "src/main.js",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=../.env src/main.js",
+    "fake": "BRIDGE_FAKE_FIXTURES=fixtures/handwritten node --env-file-if-exists=../.env src/main.js",
+    "test": "node --test \"test/*.test.js\""
+  },
+  "dependencies": {
+    "qrcode-terminal": "0.12.0",
+    "whatsapp-web.js": "1.34.7"
+  }
+}

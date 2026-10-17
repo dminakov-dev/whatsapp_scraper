@@ -30,6 +30,8 @@ __pycache__/
 
 # --- Node (Phase 2 bridge) ---
 node_modules/
+# Raw recorded WhatsApp responses (private data): commit only reviewed, redacted copies
+bridge/fixtures/recorded/
 
 # --- OS / editors ---
 .DS_Store

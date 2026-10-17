@@ -8,9 +8,10 @@ in SQLite and exports it to JSONL. It is built to be **resilient**: a failing ch
 malformed event, a rate limit or a bridge outage never crashes the run, and a restart
 continues from where it stopped without creating duplicates.
 
-> **Status:** Phase 1. All Python logic runs against `bridge_mock/`, a fake bridge with
-> fault injection. The real WhatsApp bridge (Node.js, whatsapp-web.js) comes in Phase 2
-> and is swapped in by changing `BRIDGE_URL` only.
+> **Status:** Phase 1 done; Phase 2 bridge built and tested against fixtures, not yet linked
+> to WhatsApp. All Python logic also runs against `bridge_mock/`, a fake bridge with fault
+> injection. The real bridge ([`bridge/`](bridge/README.md), Node.js + whatsapp-web.js) is
+> swapped in by changing `BRIDGE_URL` only.
 
 ## Architecture
 
@@ -18,7 +19,7 @@ continues from where it stopped without creating duplicates.
 WhatsApp account (spare number, linked device)
    │
    ▼
-bridge (Phase 1: bridge_mock/, Phase 2: Node.js whatsapp-web.js)
+bridge (bridge_mock/ on :8001, or bridge/ Node.js whatsapp-web.js on :8002)
    │  live:  POST /webhook  ──────────────►  collector/receiver.py ─┐
    │  pull:  GET /health, /chats,                                   ├─► data/collector.db
    │         /chats/{id}/messages  ◄───────  collector/backfill.py ─┘      (SQLite, WAL)
@@ -57,6 +58,14 @@ Run the three processes, each in its own terminal:
 .venv/bin/python -m collector.backfill   # paced backfill / gap-fill worker
 ```
 
+With the real WhatsApp bridge instead of the mock (Node.js 22+; details in
+[`bridge/README.md`](bridge/README.md)):
+
+```bash
+cd bridge && npm install && npm start    # 127.0.0.1:8002; prints a QR on first run
+# in .env: BRIDGE_URL=http://127.0.0.1:8002 and a non-empty BRIDGE_TOKEN
+```
+
 Worker options:
 
 | Command | What it does |
@@ -75,8 +84,12 @@ Export:
 Tests:
 
 ```bash
-.venv/bin/python -m pytest -q
+.venv/bin/python -m pytest -q        # includes tests/test_bridge_contract.py (needs node)
+cd bridge && npm test                # bridge unit + contract tests
 ```
+
+`tests/test_bridge_contract.py` starts the real Node bridge in fake mode (fixtures instead of
+WhatsApp) and drives it with the unchanged `BridgeClient`, backfill worker and receiver.
 
 Coverage needs `pytest-cov`, a dev-only tool that is not in `requirements.txt`:
 
@@ -207,6 +220,7 @@ collector/
   export.py     SQLite -> JSONL
   targets.py    CLI: list / re-enable / disable targets
 bridge_mock/    fake bridge: same contract, history window, fault injection
+bridge/         real bridge: Node.js + whatsapp-web.js (see bridge/README.md)
 tests/          pytest
 ```
 

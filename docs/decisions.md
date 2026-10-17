@@ -26,3 +26,21 @@ The receiver answers 200 for anything it will never accept (malformed, direct ch
 target) and 500 only when its own storage failed. `bridge_mock` never retries, and anything
 missed is recovered by backfill gap-fill. The real bridge should retry a 500 a few times with
 backoff (safe thanks to dedup); see the bridge contract in `CLAUDE.md`.
+
+## Bridge: one WhatsApp Web operation at a time, busy = 409
+Puppeteer can't cancel a running `page.evaluate`, so a timed-out history request (504) keeps
+running in the browser. The bridge stays "busy" until it really ends and answers 409 to anything
+else meanwhile, instead of queueing more work onto a page that is already slow.
+**Trade-off:** a slow chat delays every other chat by one retry; the collector backs off per
+target, so this costs time, not data.
+
+## Bridge: history window grows by doubling
+`fetchMessages` loads older messages from WhatsApp's servers step by step, so asking for 500
+every time would be the loudest possible pattern. The window starts at `max(2·limit, 50)` and
+doubles only while it doesn't reach `since`. **Trade-off:** a chat far behind costs several
+round trips in one request (bounded by `HISTORY_MAX_FETCH` and `OP_TIMEOUT_MS`).
+
+## Bridge-side pacing guard answers 429, not 409
+`HISTORY_MIN_INTERVAL` protects the account even if the collector is misconfigured. It answers
+429 + `Retry-After` because pacing is account-wide: 429 pauses the whole loop, while 409 would
+mark individual targets as failing and grow their `fail_count` for no fault of theirs.

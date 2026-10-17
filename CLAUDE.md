@@ -21,13 +21,14 @@
 
 ## Status (replace, don't append)
 - Talkman SIM active (stays in the main phone, only for SMS). WhatsApp registered on a separate old Android phone as primary device: clean install, no restored backup, contacts permission denied, backup off, neutral profile, 2FA PIN on. Subscribing manually to 3–5 public channels; account warming until Phase 2 (~2026-10-19).
-- Phase 1 done (2026-10-17): collector (`db`, `models`, `source`, `receiver`, `backfill`, `export`, `targets` CLI), `bridge_mock` with fault injection, 193 tests, README draft.
-- Not done: Phase 2 bridge, sample data, REPORT.md. `account_events` so far holds **mock data only** — not usable as observed limits.
+- Phase 1 done (2026-10-17): collector (`db`, `models`, `source`, `receiver`, `backfill`, `export`, `targets` CLI), `bridge_mock` with fault injection, README draft.
+- Phase 2 bridge built 2026-10-17, **not linked yet**: `bridge/` (whatsapp-web.js 1.34.7, Node 25 OK), 47 Node tests + `tests/test_bridge_contract.py` against handwritten fixtures (199 pytest). Plan for 2026-10-18: first link in quiet mode (webhook only, then slow channel backfill), `RECORD_DIR` → redact → rerun contract tests on recorded fixtures; confirm channel `message` events, invite code, `serverId`.
+- Not done: live link, sample data, REPORT.md. `account_events` so far holds **mock data only** — not usable as observed limits.
 
 ## Phases
 1. ~~Phase 1 — Python logic against `bridge_mock/`.~~ Done.
 2. **Phase 2 — real bridge** (`bridge/`, Node.js, whatsapp-web.js). Check current whatsapp-web.js docs first. Swap by `BRIDGE_URL` only; Python must not change. Checklist:
-   - implement the contract below exactly; record real responses as fixtures and add a contract test (`/health` in each state, `/chats`, history page, webhook event);
+   - ~~implement the contract below exactly; contract test on handwritten fixtures~~ done; record real responses (`RECORD_DIR`) and rerun the same contract tests on them;
    - forward only content messages: drop `status@broadcast` and system types (`e2e_notification`, `gp2`, `notification_template`, `call_log`, `revoked`, …) — otherwise they arrive as empty "media" rows or `malformed_payload` noise;
    - find out whether channel `invite_code` / `server_id` are available (else URLs stay `wa://…`);
    - group `fetchMessages` is unreliable → expect small windows and `possible_gap` events.
@@ -59,6 +60,7 @@ Payload shapes: top of `collector/models.py`. The collector classifies errors on
 | other 4xx | not in the contract → our bug | like 400 |
 | unreachable | bridge process down | loop-level pause, `disconnected` |
 
+- **Direct chats / status:** never listed; a history request for one is our bug → **400**, never 403 (403 would skip/re-enable forever).
 - **`GET /health`:** 200 `{"ok": true, "state": "CONNECTED"}` only when the session is usable; otherwise 401 or 200 with `ok: false` and the whatsapp-web.js state. Any other `/health` failure → loop-level pause, `bridge_unhealthy`.
 - **History `GET /chats/{id}/messages?since=<unix s>&limit=<1..500>`:** messages with `timestamp >= since`, **oldest first**, the **oldest** `limit` of them — never the newest `limit` (`fetchMessages` returns the latest N; sort ascending, filter, then cut). Always include `oldest_available` (oldest timestamp in the window, or null). `BATCH_SIZE ≤ 125` because the stuck-cursor retry asks for 4×.
 - **`id` is `id._serialized` on both paths** (webhook and history): it is the dedup key with `chat_id`; different id forms would store every message twice.
