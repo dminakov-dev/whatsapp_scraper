@@ -69,11 +69,12 @@ CREATE INDEX IF NOT EXISTS idx_events_ts ON account_events (ts);
 """
 
 
-def connect(db_path: str) -> sqlite3.Connection:
+def connect(db_path: str, *, ensure: bool = True) -> sqlite3.Connection:
     """Open the database (creating the folder if needed) and ensure the schema.
 
     WAL lets the webhook receiver and the backfill worker (two processes) read and
     write the same file; busy_timeout makes a writer wait instead of failing at once.
+    ensure=False skips the schema check for short-lived per-request connections.
     """
     if db_path != ":memory:":
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -81,7 +82,8 @@ def connect(db_path: str) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
-    ensure_schema(conn)
+    if ensure:
+        ensure_schema(conn)
     return conn
 
 
