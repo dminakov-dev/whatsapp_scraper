@@ -138,7 +138,8 @@ WhatsApp is low-volume: the lecturer's production WhatsApp collector had only 32
 
 ## Status
 - Spare number: **Talkman SIM bought 2026-10-16, not activated yet.** Plan: second WhatsApp account on the Android phone, two-step verification PIN on, neutral profile.
-- Next step: Phase 1.
+- 2026-10-17: **Phase 1 done** — collector (db, models, source adapter, receiver, backfill, export), bridge_mock with fault injection, 113 tests, README draft. Bridge contract lives in `collector/models.py`.
+- Next step: Phase 2 (real Node bridge) once the number is activated; decision point 2026-10-20.
 
 ## Lessons learned
 (Add short entries here whenever we hit something non-obvious, so we don't step on the same rake twice.)
