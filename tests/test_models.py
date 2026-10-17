@@ -82,3 +82,13 @@ def test_canonical_row_fits_the_database(conn):
     row = normalize(group_msg(), via="webhook").as_row()
     assert set(row) == set(db.MESSAGE_COLUMNS)
     assert db.insert_messages(conn, [row]) == 1
+
+
+def test_unexpected_internal_error_is_dropped_not_raised(monkeypatch):
+    import collector.models as models
+
+    def bug(msg, via):
+        raise RuntimeError("bug in our parsing")
+
+    monkeypatch.setattr(models, "_to_canonical", bug)
+    assert models.normalize(group_msg(), via="webhook") is None

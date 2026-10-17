@@ -235,3 +235,34 @@ def test_unexpected_exception_does_not_stop_the_loop(h, monkeypatch):
     h.worker.run(max_ticks=3)
     assert calls["n"] == 3 and h.events("worker_error")
     assert h.count() > 0
+
+
+# --- coverage gaps: account errors outside the health check -------------------------------
+
+def test_429_during_history_fetch_pauses_loop_and_leaves_target_alone(h):
+    h.worker.start()
+    h.worker.ticks = 1                     # next tick does not re-sync: the 429 hits the fetch
+    h.faults.fail_429, h.faults.retry_after = 1.0, 17
+    result = h.worker.tick()
+    assert result.status == "paused" and result.pause == 17
+    assert all(t["fail_count"] == 0 and t["status"] == "active" and t["cursor_ts"] is None
+               for t in db.active_targets(h.conn))
+    assert h.conn.execute("SELECT COUNT(*) FROM account_events "
+                          "WHERE kind='rate_limited' AND chat_id IS NOT NULL").fetchone()[0] == 1
+
+
+def test_startup_with_bridge_down_does_not_crash_and_then_pauses(h):
+    db.sync_targets(h.conn, [{"chat_id": GROUP, "chat_type": "group", "name": "g"}])
+    h.faults.auth_fail = True
+    h.worker.start()                       # must not raise
+    assert h.worker.tick().status == "paused"
+    h.faults.auth_fail = False             # bridge comes back: collection resumes
+    assert h.worker.tick().status == "ok"
+
+
+def test_failed_membership_sync_keeps_existing_targets(h):
+    h.worker.start()
+    before = [t["chat_id"] for t in db.active_targets(h.conn)]
+    h.faults.fail_5xx = 1.0                # /chats answers 503
+    h.worker.sync()                        # must not raise
+    assert [t["chat_id"] for t in db.active_targets(h.conn)] == before

@@ -112,3 +112,15 @@ def test_token_is_enforced_when_configured(tmp_path):
     assert client.post("/webhook", json=message(), headers={"X-Bridge-Token": "nope"}).status_code == 401
     ok = client.post("/webhook", json=message(), headers={"X-Bridge-Token": "s3cret"})
     assert ok.status_code == 200 and ok.json()["inserted"] == 1
+
+
+def test_database_cannot_be_opened_returns_500(client, monkeypatch):
+    def broken(*args, **kwargs):
+        raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(db, "connect", broken)
+    assert client.post("/webhook", json=message()).status_code == 500
+
+
+def test_health_endpoint(client):
+    assert client.get("/health").json() == {"ok": True}

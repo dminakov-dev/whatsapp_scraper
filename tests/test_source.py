@@ -160,3 +160,55 @@ def test_every_response_is_recorded_as_an_account_event(conn):
     assert [(r["kind"], r["status_code"]) for r in rows] == [("request", 200), ("rate_limited", 429)]
     assert rows[0]["latency_ms"] is not None
     assert "retry-after=9" in rows[1]["detail"].lower()
+
+
+# --- coverage gaps: unusual bridge answers ----------------------------------------------
+
+def client_answering(*, json=None, raise_exc=None, events=None):
+    def handler(request):
+        if raise_exc:
+            raise raise_exc("broken", request=request)
+        return httpx.Response(200, json=json)
+
+    recorder = (lambda kind, *a, **k: events.append(kind)) if events is not None else None
+    return BridgeClient("http://bridge", recorder=recorder,
+                        client=httpx.Client(transport=httpx.MockTransport(handler)))
+
+
+def test_other_transport_errors_are_retryable_and_recorded():
+    events = []
+    with pytest.raises(RetryableError):
+        client_answering(raise_exc=httpx.RemoteProtocolError, events=events).fetch_history(GROUP, None, 5)
+    assert events == ["bridge_error"]
+
+
+def test_non_object_body_is_retryable():
+    with pytest.raises(RetryableError):
+        client_answering(json=[1, 2, 3]).fetch_history(GROUP, None, 5)
+
+
+def test_history_without_messages_list_is_retryable():
+    with pytest.raises(RetryableError):
+        client_answering(json={"messages": "nope"}).fetch_history(GROUP, None, 5)
+
+
+def test_health_200_but_not_connected_is_an_account_error():
+    with pytest.raises(AccountError) as err:
+        client_answering(json={"ok": False, "state": "OPENING"}).health()
+    assert err.value.kind == "auth_failure" and "OPENING" in err.value.detail
+
+
+def test_malformed_chat_entries_are_skipped():
+    chats = client_answering(json={"chats": [
+        {"chat_id": GROUP, "name": "ok"},
+        {"name": "no id"},
+        "not a dict",
+        {"chat_id": "weird-jid"},
+    ]}).list_chats()
+    assert [c["chat_id"] for c in chats] == [GROUP]
+
+
+def test_close_closes_the_http_client():
+    client = client_answering(json={})
+    client.close()
+    assert client.http.is_closed

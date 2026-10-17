@@ -113,3 +113,8 @@ def test_log_event(conn):
                  latency_ms=120)
     row = conn.execute("SELECT * FROM account_events").fetchone()
     assert (row["kind"], row["status_code"], row["latency_ms"]) == ("bridge_error", 503, 120)
+
+
+def test_log_event_never_raises_even_on_a_broken_connection(conn):
+    conn.close()
+    db.log_event(conn, "bridge_error", "must not raise")   # closed connection -> swallowed
