@@ -44,3 +44,34 @@ round trips in one request (bounded by `HISTORY_MAX_FETCH` and `OP_TIMEOUT_MS`).
 `HISTORY_MIN_INTERVAL` protects the account even if the collector is misconfigured. It answers
 429 + `Retry-After` because pacing is account-wide: 429 pauses the whole loop, while 409 would
 mark individual targets as failing and grow their `fail_count` for no fault of theirs.
+
+## No durable webhook queue on the bridge
+A webhook that fails all retries is dropped, not persisted for replay. A durable queue would be
+a second on-disk store of group content (one more place to secure, review and delete), and it
+isn't needed: webhooks never move the cursor, and backfill re-reads every chat from its cursor
+on startup and every `TARGET_INTERVAL`. For our low-volume sources (a few channels and groups),
+the bridge's 500-message history window covers any realistic receiver downtime. When it does
+not, the loss is visible as a `possible_gap` event instead of being silent.
+**Trade-off:** a chat busier than the window during an outage loses the overflow for good.
+
+## Rejected payloads are logged by metadata, person ids masked
+A rejected payload is described only by its reason plus `chat_id`, `id` and `type`
+(`collector/privacy.py: safe_meta`). Text never reaches a log or `account_events.detail`, and
+person ids are masked to their last 4 digits, including the participant JID that whatsapp-web.js
+appends to group message ids. `LOG_IDENTIFIERS=full` shows ids when debugging the bridge.
+Stored messages are not masked: the canonical record needs the real author.
+
+## Exports pseudonymize person ids by default
+Submission samples must not expose phone numbers, but an analyst still needs to see that two
+messages share an author. A salted HMAC gives a stable pseudonym that can't be reversed by
+hashing every phone number (the space is small, so an unsalted hash would be). The salt is a
+secret in `.env`. `--no-pseudonymize` exists for our own research exports.
+
+## Post-homework TODO (not now)
+- **Location and contact cards.** The bridge whitelist drops `location`, `vcard` and `multi_vcard`
+  (coordinates, phone numbers). Collecting them would need explicit fields and a privacy review.
+- **Group admins.** Record `groupMetadata.participants` with `isAdmin` per group (who controls a
+  group is useful OSINT context).
+- **Author display name.** Record `pushname` / `notifyName` per message next to the author id.
+- These need a model extension, e.g. an `extra` JSON column in `messages` / `targets`, plus the
+  same masking and pseudonymization rules.

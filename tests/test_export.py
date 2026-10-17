@@ -1,7 +1,10 @@
+import argparse
 import json
 
+import pytest
+
 from collector import db
-from collector.export import EXPORT_FIELDS, export_jsonl
+from collector.export import EXPORT_FIELDS, export_jsonl, positive_int
 from tests.conftest import make_row
 
 
@@ -50,3 +53,19 @@ def test_export_replaces_file_atomically(conn, tmp_path):
     export_jsonl(conn, str(out))
     assert len(read(out)) == 3
     assert not (tmp_path / "m.jsonl.tmp").exists()
+
+
+# --- review fix 6: --limit must be positive ------------------------------------------------
+
+@pytest.mark.parametrize("limit", [0, -1])
+def test_export_rejects_non_positive_limit(conn, tmp_path, limit):
+    seed(conn)
+    with pytest.raises(ValueError, match="limit must be at least 1"):
+        export_jsonl(conn, str(tmp_path / "m.jsonl"), limit=limit)
+
+
+@pytest.mark.parametrize("value", ["0", "-5", "abc"])
+def test_cli_limit_type_rejects_non_positive(value):
+    with pytest.raises(argparse.ArgumentTypeError):
+        positive_int(value)
+    assert positive_int("3") == 3

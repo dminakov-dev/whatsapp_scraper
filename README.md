@@ -33,7 +33,9 @@ Two paths write to the same database:
   inserts it. It never touches cursors.
 - **Pull path (`backfill.py`).** A paced worker asks the bridge for history, one chat per tick, from
   that chat's cursor. It is the **only** code that advances cursors. On startup, every chat is
-  scheduled again (gap-fill), so messages pushed while the receiver was down are recovered.
+  scheduled again (gap-fill), so messages pushed while the receiver was down are recovered as
+  long as WhatsApp still holds them (its history is a window). What can't be recovered is
+  recorded as a data-quality event (`possible_gap`), never silently skipped.
 
 The bridge contract (endpoints and payload shape) is documented at the top of
 [`collector/models.py`](collector/models.py). All source-specific code sits behind the adapter in
@@ -79,7 +81,14 @@ Export:
 ```bash
 .venv/bin/python -m collector.export                                   # -> exports/messages.jsonl
 .venv/bin/python -m collector.export --chat-type channel --out sample/messages.jsonl
+.venv/bin/python -m collector.export --no-pseudonymize --out exports/research.jsonl
 ```
+
+Exports pseudonymize person ids by default: group authors, and the participant id inside group
+message ids and `wa://` urls, become `anon_<salted HMAC>` (stable, so one author keeps one
+pseudonym). Channels keep their ids. `--no-pseudonymize` exports real ids for your own research;
+never use it for submission samples. Mentions inside message text are not rewritten, so samples
+still need a manual review. `--limit` must be at least 1.
 
 Tests:
 
@@ -106,7 +115,10 @@ variable. Real environment variables override `.env`. Key settings:
 | Variable | Default | Meaning |
 |---|---|---|
 | `BRIDGE_URL` | `http://127.0.0.1:8001` | the only switch between the mock and the real bridge |
-| `BRIDGE_TOKEN` | empty | shared secret in the `X-Bridge-Token` header (the receiver rejects other requests) |
+| `BRIDGE_TOKEN` | empty | shared secret in the `X-Bridge-Token` header (the receiver rejects other requests); empty is for loopback development only and logs a warning |
+| `HOST` / `ALLOW_NON_LOOPBACK` | `127.0.0.1` / off | the receiver must bind to a loopback address; any other `HOST` fails at startup unless `ALLOW_NON_LOOPBACK=1` **and** `BRIDGE_TOKEN` is set |
+| `LOG_IDENTIFIERS` | `masked` | person ids (`@c.us`, `@lid`) in logs / `account_events` of rejected payloads: `masked` keeps the last 4 digits, `full` shows them. Message text is never logged; stored messages always keep full ids |
+| `PSEUDONYM_SALT` | empty | secret for export pseudonymization (≥ 16 chars, e.g. `openssl rand -hex 32`); required unless `--no-pseudonymize` |
 | `BATCH_SIZE` | 50 | messages per backfill request ("one run = a small batch"); 1..125, because the stuck-cursor retry asks for 4× and the bridge accepts at most 500 |
 | `TICK_SLEEP` / `JITTER` | 5 / 2 s | pause between ticks, plus random jitter |
 | `BACKOFF_BASE` / `BACKOFF_MAX` | 1 / 300 s | exponential backoff `base·2^(n-1)`, capped, plus jitter |
@@ -115,6 +127,9 @@ variable. Real environment variables override `.env`. Key settings:
 | `FUTURE_TOLERANCE` | 300 s | message dates later than now + this are rejected (`future_timestamp` event) |
 | `RETRY_AFTER_MAX` | 3600 s | sanity cap for a bridge `Retry-After`; capping is logged |
 | `MOCK_FAIL_*`, `MOCK_SLOW`, `MOCK_DUPLICATE`, `MOCK_MALFORMED`, `MOCK_AUTH_FAIL` | see file | fault injection in the mock |
+
+Numbers are validated at startup: negative, `nan` / `inf` and out-of-range values (ports outside
+1–65535, a zero `REQUEST_TIMEOUT`) fail with a clear `ConfigError` instead of later at runtime.
 
 Every service binds to `127.0.0.1` only. Logs go to stdout and to rotating files in
 `logs/` (`receiver.log`, `backfill.log`, `bridge_mock.log`; 5 MB × 5 each).
@@ -177,7 +192,8 @@ Errors are classified by **scope**, as in the lecture's account-health logic:
 | 401, bridge unreachable | account | pause the whole loop; per-chat state untouched |
 | `/health` failing (5xx, 409, timeout, bad JSON) | account | pause the whole loop with growing backoff, `bridge_unhealthy` event |
 | 400 and any other 4xx | our request | our own bug, not the chat's fault: pause the whole loop, `bad_request` event, targets untouched |
-| webhook: malformed payload | — | `200` (retrying garbage is pointless), logged |
+| webhook: malformed payload | — | `200` (retrying garbage is pointless), logged as reason + `chat_id` / `id` / `type` (never the text) |
+| webhook: body over 1 MiB | — | `413`, final (the bridge retries only 5xx) |
 | webhook: database error | — | `500`, so the bridge may retry (safe thanks to dedup) |
 
 `/health` is checked before every tick. Any unexpected exception is logged as
@@ -243,3 +259,7 @@ Phase 3 for what we actually observed). In short:
 - `whatsapp-web.js` depends on WhatsApp Web internals and can break after WhatsApp updates.
 - Unofficial clients are against WhatsApp's terms, so the number can be banned. That is why a
   spare number is used.
+- `npm audit` in `bridge/` reports high-severity advisories in puppeteer's install-time
+  dependencies (`extract-zip`, no patched release; `basic-ftp`). They are used only to download
+  and unpack Chromium over HTTPS during `npm install`, not by the running bridge. We track the
+  advisory instead of switching to a fork.

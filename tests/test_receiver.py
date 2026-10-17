@@ -132,3 +132,28 @@ def test_future_dated_message_is_ignored_with_its_own_event(client, cfg):
     assert response.status_code == 200 and response.json()["ignored"] == "future timestamp"
     assert count(cfg) == 0
     assert count(cfg, "SELECT COUNT(*) FROM account_events WHERE kind='future_timestamp'") == 1
+
+
+# --- review fix 2: request body size limit ------------------------------------------------
+
+def test_oversized_body_is_rejected_with_413_and_not_stored(client, cfg):
+    huge = message(body="x" * (receiver.MAX_WEBHOOK_BYTES + 1))
+    resp = client.post("/webhook", json=huge)
+    assert resp.status_code == 413
+    assert count(cfg) == 0
+
+
+def test_oversized_body_without_content_length_is_rejected_while_streaming(client, cfg):
+    def chunks():
+        for _ in range(3):
+            yield b"x" * (receiver.MAX_WEBHOOK_BYTES // 2)
+
+    resp = client.post("/webhook", content=chunks())      # chunked: no Content-Length
+    assert resp.status_code == 413
+    assert count(cfg) == 0
+
+
+def test_body_at_the_limit_is_still_processed(client):
+    body = json.dumps(message())
+    assert len(body) < receiver.MAX_WEBHOOK_BYTES
+    assert client.post("/webhook", content=body).status_code == 200

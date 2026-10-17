@@ -32,6 +32,7 @@
    - forward only content messages: drop `status@broadcast` and system types (`e2e_notification`, `gp2`, `notification_template`, `call_log`, `revoked`, …) — otherwise they arrive as empty "media" rows or `malformed_payload` noise;
    - find out whether channel `invite_code` / `server_id` are available (else URLs stay `wa://…`);
    - group `fetchMessages` is unreliable → expect small windows and `possible_gap` events.
+   - **live validation on first link** (reviewer's list): group message delivery; channel post delivery (does `message` fire for channels?); same `id` for one message via webhook and via history; channel permalink (invite code + `serverId` → `https://whatsapp.com/channel/…`); recovery after a receiver outage (stop receiver, wait for posts, restart → backfill fills the gap, no duplicates).
 3. **Phase 3 — deliverables:** ≥ 200 records from public channels (`python -m collector.export --chat-type channel`), review for private data, REPORT.md from real `account_events`.
 4. **Phase 4 — bonuses** (optional): Docker Compose, stats dashboard.
 

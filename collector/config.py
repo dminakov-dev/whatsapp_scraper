@@ -3,16 +3,22 @@
 Every setting has a safe local default, so the collector runs against bridge_mock with
 an empty .env. Switching to the real bridge is a matter of changing BRIDGE_URL.
 """
+import math
 import os
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
+
+from .privacy import LOG_MODES
 
 
 # Bridge contract: GET /chats/{id}/messages accepts limit 1..BRIDGE_MAX_LIMIT.
 BRIDGE_MAX_LIMIT = 500
 # A stuck backfill retries once with limit * STUCK_LIMIT_FACTOR, which must stay within the max.
 STUCK_LIMIT_FACTOR = 4
+# The receiver accepts webhooks carrying group content: it binds to this machine only,
+# like the bridge (bridge/src/config.js), unless explicitly allowed AND protected by a token.
+LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
 
 
 class ConfigError(ValueError):
@@ -27,10 +33,16 @@ class Config:
 
     # Collector process
     host: str = "127.0.0.1"
+    # Non-loopback HOST is refused unless this is set, and then only with a BRIDGE_TOKEN
+    allow_non_loopback: bool = False
     receiver_port: int = 8000
     db_path: str = "data/collector.db"
     log_dir: str = "logs"
     log_level: str = "INFO"
+    # Person ids in logs / account_events of rejected payloads: masked (****4567@c.us) or full
+    log_identifiers: str = "masked"
+    # Secret salt for export pseudonymization of group authors (HMAC); see collector/privacy.py
+    pseudonym_salt: str = ""
 
     # Pacing and backoff, in seconds
     tick_sleep: float = 5.0
@@ -63,9 +75,23 @@ def _get(name: str, default, cast):
         value = cast(raw.strip())
     except ValueError:
         raise ConfigError(f"{name}={raw!r} is not a valid {cast.__name__}") from None
+    if cast is float and not math.isfinite(value):
+        raise ConfigError(f"{name}={raw!r} must be a finite number")
     if cast in (int, float) and value < 0:
         raise ConfigError(f"{name}={raw!r} must not be negative")
     return value
+
+
+def _get_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    value = raw.strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("0", "false", "no", "off"):
+        return False
+    raise ConfigError(f"{name}={raw!r} is not a valid boolean")
 
 
 def load_config(env_file: str | None = ".env") -> Config:
@@ -82,10 +108,13 @@ def load_config(env_file: str | None = ".env") -> Config:
         bridge_url=_get("BRIDGE_URL", d.bridge_url, str).rstrip("/"),
         bridge_token=_get("BRIDGE_TOKEN", d.bridge_token, str),
         host=_get("HOST", d.host, str),
+        allow_non_loopback=_get_bool("ALLOW_NON_LOOPBACK", d.allow_non_loopback),
         receiver_port=_get("RECEIVER_PORT", d.receiver_port, int),
         db_path=_get("DB_PATH", d.db_path, str),
         log_dir=_get("LOG_DIR", d.log_dir, str),
         log_level=_get("LOG_LEVEL", d.log_level, str).upper(),
+        log_identifiers=_get("LOG_IDENTIFIERS", d.log_identifiers, str).lower(),
+        pseudonym_salt=_get("PSEUDONYM_SALT", d.pseudonym_salt, str),
         tick_sleep=_get("TICK_SLEEP", d.tick_sleep, float),
         jitter=_get("JITTER", d.jitter, float),
         backoff_base=_get("BACKOFF_BASE", d.backoff_base, float),
@@ -103,6 +132,18 @@ def load_config(env_file: str | None = ".env") -> Config:
         raise ConfigError(f"BATCH_SIZE must be between 1 and {max_batch} "
                           f"(x{STUCK_LIMIT_FACTOR} for a stuck cursor must fit the bridge "
                           f"limit of {BRIDGE_MAX_LIMIT})")
+    if cfg.host not in LOOPBACK_HOSTS:
+        if not cfg.allow_non_loopback:
+            raise ConfigError(f"HOST={cfg.host!r} is not a loopback address "
+                              f"({', '.join(LOOPBACK_HOSTS)}); set ALLOW_NON_LOOPBACK=1 to override")
+        if not cfg.bridge_token:
+            raise ConfigError("a non-loopback HOST requires a non-empty BRIDGE_TOKEN")
+    if not 1 <= cfg.receiver_port <= 65535:
+        raise ConfigError(f"RECEIVER_PORT must be between 1 and 65535, got {cfg.receiver_port}")
+    if cfg.request_timeout <= 0:
+        raise ConfigError("REQUEST_TIMEOUT must be greater than 0")
+    if cfg.log_identifiers not in LOG_MODES:
+        raise ConfigError(f"LOG_IDENTIFIERS must be one of {', '.join(LOG_MODES)}")
     if cfg.sync_every == 0:
         raise ConfigError("SYNC_EVERY must be at least 1")
     if cfg.backoff_max < cfg.backoff_base:

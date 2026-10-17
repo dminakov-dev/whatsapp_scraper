@@ -27,6 +27,7 @@ import httpx
 
 from .models import (DEFAULT_FUTURE_TOLERANCE, CanonicalMessage, InvalidPayload, chat_type_of,
                      is_future, normalize, parse_unix_timestamp)
+from .privacy import safe_meta
 from .timeutil import iso_from_unix, parse_iso
 
 log = logging.getLogger(__name__)
@@ -115,7 +116,8 @@ class BridgeClient:
 
     def __init__(self, base_url: str, *, token: str = "", timeout: float = 10.0,
                  recorder: Recorder | None = None, client: httpx.Client | None = None,
-                 future_tolerance: float = DEFAULT_FUTURE_TOLERANCE):
+                 future_tolerance: float = DEFAULT_FUTURE_TOLERANCE,
+                 log_identifiers: str = "masked"):
         self.base_url = base_url.rstrip("/")
         headers = {"X-Bridge-Token": token} if token else {}
         self.http = client or httpx.Client(timeout=timeout)
@@ -123,6 +125,7 @@ class BridgeClient:
         self.timeout = timeout
         self.record = recorder or (lambda *a, **k: None)
         self.future_tolerance = future_tolerance
+        self.log_identifiers = log_identifiers
 
     def close(self) -> None:
         self.http.close()
@@ -201,7 +204,8 @@ class BridgeClient:
                 chats.append({"chat_id": chat_id, "chat_type": chat_type_of(chat_id),
                               "name": chat.get("name")})
             except (KeyError, TypeError, InvalidPayload):
-                log.warning("ignoring malformed chat entry: %.200r", chat)
+                log.warning("ignoring malformed chat entry: %s",
+                            safe_meta(chat, self.log_identifiers))
         return chats
 
     def fetch_history(self, chat_id: str, since: str | None, limit: int) -> HistoryPage:
@@ -229,7 +233,8 @@ class BridgeClient:
                 ts = None
             if ts is not None:
                 reached.append(ts)
-            m = normalize(r, via="backfill", future_tolerance=self.future_tolerance)
+            m = normalize(r, via="backfill", future_tolerance=self.future_tolerance,
+                          log_identifiers=self.log_identifiers)
             if m is not None:
                 messages.append(m)
         oldest = body.get("oldest_available")

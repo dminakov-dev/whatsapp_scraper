@@ -34,6 +34,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from .privacy import safe_meta
 from .timeutil import iso_from_unix, now_iso
 
 log = logging.getLogger(__name__)
@@ -69,7 +70,11 @@ class CanonicalMessage:
 
 
 class InvalidPayload(ValueError):
-    """The payload doesn't match the bridge contract."""
+    """The payload doesn't match the bridge contract.
+
+    The message is logged and stored in account_events, so it must say WHAT is wrong without
+    quoting the value: a value can be message text or a person's id.
+    """
 
 
 class FutureTimestamp(InvalidPayload):
@@ -84,7 +89,7 @@ def chat_type_of(chat_id: str) -> str:
         return "channel"
     if chat_id.endswith(("@c.us", "@lid", "@s.whatsapp.net")):
         return "direct"
-    raise InvalidPayload(f"unknown JID type: {chat_id!r}")
+    raise InvalidPayload("unknown JID type")
 
 
 def build_url(chat_id: str, message_id: str, invite_code: Any = None, server_id: Any = None) -> str:
@@ -101,18 +106,19 @@ def build_url(chat_id: str, message_id: str, invite_code: Any = None, server_id:
 def _require_str(msg: Mapping[str, Any], key: str) -> str:
     value = msg.get(key)
     if not isinstance(value, str) or not value.strip():
-        raise InvalidPayload(f"{key!r} must be a non-empty string, got {value!r}")
+        got = "empty string" if isinstance(value, str) else type(value).__name__
+        raise InvalidPayload(f"{key!r} must be a non-empty string, got {got}")
     return value.strip()
 
 
 def parse_unix_timestamp(value: Any) -> int | float:
     """Validated Unix seconds from a bridge `timestamp` field. Raises InvalidPayload."""
     if isinstance(value, bool):  # bool is a subclass of int in Python
-        raise InvalidPayload(f"timestamp must be a number, got {value!r}")
+        raise InvalidPayload("timestamp must be a number, got bool")
     if isinstance(value, str) and value.strip().isdigit():
         value = int(value)
     if not isinstance(value, (int, float)):
-        raise InvalidPayload(f"timestamp must be a number, got {value!r}")
+        raise InvalidPayload(f"timestamp must be a number, got {type(value).__name__}")
     if not _MIN_TS <= value <= _MAX_TS:
         raise InvalidPayload(f"timestamp {value!r} out of range (milliseconds instead of seconds?)")
     return value
@@ -178,18 +184,30 @@ def _to_canonical(msg: Any, via: str, future_tolerance: float) -> CanonicalMessa
     )
 
 
-def normalize(msg: Any, via: str, *,
-              future_tolerance: float = DEFAULT_FUTURE_TOLERANCE) -> CanonicalMessage | None:
-    """Bridge message -> CanonicalMessage, or None if malformed. Never raises.
+def normalize_with_reason(msg: Any, via: str, *,
+                          future_tolerance: float = DEFAULT_FUTURE_TOLERANCE,
+                          log_identifiers: str = "masked"
+                          ) -> tuple[CanonicalMessage | None, str | None]:
+    """Bridge message -> (CanonicalMessage, None), or (None, reason) if malformed. Never raises.
 
-    A bad payload is logged with the reason and dropped; it must not crash the
-    receiver or abort a backfill batch.
+    A bad payload is logged with the reason and safe metadata only (chat_id, id, type;
+    person ids masked unless log_identifiers="full"), never its text: it must not crash
+    the receiver or abort a backfill batch, and it must not leak into logs either.
     """
     try:
-        return _to_canonical(msg, via, future_tolerance)
+        return _to_canonical(msg, via, future_tolerance), None
     except InvalidPayload as exc:
-        log.warning("dropping malformed message (%s): %.200r", exc, msg)
-        return None
-    except Exception:  # a bug in our own parsing: still drop, but with a traceback
-        log.exception("unexpected error normalizing message: %.200r", msg)
-        return None
+        log.warning("dropping malformed message (%s): %s", exc, safe_meta(msg, log_identifiers))
+        return None, str(exc)
+    except Exception as exc:  # a bug in our own parsing: still drop it
+        # The traceback's exception text may quote the payload: only with LOG_IDENTIFIERS=full.
+        log.error("unexpected error normalizing message (%s): %s", type(exc).__name__,
+                  safe_meta(msg, log_identifiers), exc_info=log_identifiers == "full")
+        return None, f"internal error: {type(exc).__name__}"
+
+
+def normalize(msg: Any, via: str, *, future_tolerance: float = DEFAULT_FUTURE_TOLERANCE,
+              log_identifiers: str = "masked") -> CanonicalMessage | None:
+    """Bridge message -> CanonicalMessage, or None if malformed. Never raises."""
+    return normalize_with_reason(msg, via, future_tolerance=future_tolerance,
+                                 log_identifiers=log_identifiers)[0]

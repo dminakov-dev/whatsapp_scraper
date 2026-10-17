@@ -257,7 +257,8 @@ def main() -> None:
     conn = db.connect(cfg.db_path)
     source = BridgeClient(cfg.bridge_url, token=cfg.bridge_token, timeout=cfg.request_timeout,
                           recorder=lambda *a, **k: db.log_event(conn, *a, **k),
-                          future_tolerance=cfg.future_tolerance)
+                          future_tolerance=cfg.future_tolerance,
+                          log_identifiers=cfg.log_identifiers)
     worker = Worker(cfg, conn, source)
     log.info("backfill worker: bridge=%s db=%s", cfg.bridge_url, cfg.db_path)
     try:
