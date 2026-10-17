@@ -131,6 +131,7 @@ class Worker:
             return self._account_pause(exc)
         except TargetError as exc:
             db.mark_skipped(self.conn, chat_id, f"{exc.status_code}: {exc.detail}")
+            # No status_code here: the request event already carries it (avoids double counting).
             db.log_event(self.conn, "target_skipped", exc.detail, chat_id=chat_id)
             log.warning("%s: permanent error %s — target skipped", chat_id, exc.status_code)
             return TickResult("skipped", chat_id, detail=exc.detail)

@@ -235,7 +235,10 @@ def disable_target(conn: sqlite3.Connection, chat_id: str) -> bool:
 
 def make_all_due(conn: sqlite3.Connection) -> int:
     """Startup gap-fill: every active target becomes due now, then the normal paced loop
-    walks them one per tick. Returns how many targets were scheduled."""
+    walks them one per tick. Returns how many targets were scheduled.
+
+    Trade-off: this also clears a pending retry delay, so a failing chat is retried right
+    after a restart; fail_count is kept, so its backoff continues (see docs/decisions.md)."""
     with conn:
         cur = conn.execute(
             "UPDATE targets SET next_run_at = NULL WHERE enabled = 1 AND status = 'active'"

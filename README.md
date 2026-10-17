@@ -78,6 +78,13 @@ Tests:
 .venv/bin/python -m pytest -q
 ```
 
+Coverage needs `pytest-cov`, a dev-only tool that is not in `requirements.txt`:
+
+```bash
+uv pip install --python .venv pytest-cov
+.venv/bin/python -m pytest -q --cov=collector --cov-report=term-missing
+```
+
 ## Configuration
 
 All settings come from `.env`. See [`.env.example`](.env.example), which documents every
@@ -164,7 +171,7 @@ Errors are classified by **scope**, as in the lecture's account-health logic:
 `worker_error`, and the loop keeps going.
 
 The full bridge error contract (what each code means on the bridge side) is in
-[`CLAUDE.md`](CLAUDE.md#bridge-error-contract-the-real-node-bridge-in-phase-2-must-answer-this-way).
+[`CLAUDE.md`](CLAUDE.md#bridge-contract-the-phase-2-node-bridge-must-follow-it).
 
 ### Managing targets
 
@@ -214,7 +221,8 @@ tests/          pytest
 
 ## Known limitations
 
-See `REPORT.md` (Phase 3) for the full list, with what we actually observed. In short:
+See [`docs/report-notes.md`](docs/report-notes.md) for the full list (and `REPORT.md` in
+Phase 3 for what we actually observed). In short:
 
 - Groups are end-to-end encrypted, so only messages received after the number joined are
   available. Channel history before subscribing is limited to the most recent posts.

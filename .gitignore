@@ -20,8 +20,7 @@ logs/
 *.log
 
 # --- Course materials (not ours to redistribute) ---
-docs /
-docs/
+course-materials/
 
 # --- Python ---
 .venv/
