@@ -72,6 +72,17 @@ are never included in the submission export. They are still collected for our ow
 in the gitignored database and `exports/`. Every sample is still reviewed by hand before
 committing (mentions or phone numbers inside text).
 
+## whatsapp-web.js is patched locally, by id kind, never guessing
+WhatsApp Web 2.3000.x broke every read in whatsapp-web.js 1.34.7 (missing `_serialized`), and
+no fixed release exists. Options were: install an unreleased upstream branch (unreviewed code
+that also touches send paths), switch sources early, or patch the read paths ourselves. We
+patch with patch-package (committed, re-applied on `npm install`), only on read paths.
+Ids resolve by kind (`_serialized`, then a value of the right shape, then `$1` only if it has
+that shape): a message key also contains the chat and participant WIDs, so a "first
+id-looking string" rule would return the chat id as the message id and store every message of
+a chat as duplicates of one. When nothing fits, the item is skipped and a warning is logged.
+**Trade-off:** we own a patch against library internals until upstream releases a fix.
+
 ## Post-homework TODO (not now)
 - **Location and contact cards.** The bridge whitelist drops `location`, `vcard` and `multi_vcard`
   (coordinates, phone numbers). Collecting them would need explicit fields and a privacy review.

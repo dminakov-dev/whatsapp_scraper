@@ -87,6 +87,30 @@ The allowlist is a hook (`createAllowlist` in `src/filter.js`), used by both the
 webhook path. `EXTRA_TYPES_BY_CHAT` opens a type for one chat only. It forwards the type and caption
 but not type-specific fields: a `location` arrives as `type: "location"` without coordinates.
 
+## Patched whatsapp-web.js (WhatsApp Web 2.3000.x)
+
+On the first live session (2026-10-18), every read failed inside WhatsApp Web with a minified
+`r: r` error (`getChats`, `getChannels`): WhatsApp Web 2.3000.x no longer exposes
+`_serialized` on live id objects, so whatsapp-web.js 1.34.7 passed `undefined` keys to
+IndexedDB (upstream: wwebjs PR #201910, issue #201845; not released on npm yet).
+
+`patches/whatsapp-web.js+1.34.7.patch` is applied by `postinstall` (patch-package) and
+touches only read paths in `src/util/Injected/Utils.js`: `getMessageModel` (message event
+and `fetchMessages`), `getChatModel` (`getChatById`, listings), `getChats`, `getChannels`.
+- Ids are resolved by **kind**: `_serialized` → a value of the right shape
+  (message key: only `/^(true|false)_/`; chat/contact WID: only `user@server`) → `$1` only if
+  it has that shape → WID only: `user@server`. Nothing fits → `undefined` and the item is
+  skipped. Never a guess: a message key also holds the chat WID, and returning it would
+  break dedup.
+- One chat that can't be modelled is skipped instead of failing the whole listing.
+- Every fallback or miss is `console.warn`ed in the page with `[wa-bridge:id-fallback]`;
+  the bridge logs it as `whatsapp-web.js id fallback` (warn, repeats folded per minute), so a
+  future rename shows up in the log. Send / seen / join / presence code is untouched
+  (`test/wwebjs-patch.test.js` checks the patch file).
+
+Remove the patch when an upstream release fixes this (bump the version, delete the file,
+re-run the tests and the live checklist).
+
 ## Read-only
 
 The code never calls a write method; `test/readonly.test.js` fails on `sendMessage`,

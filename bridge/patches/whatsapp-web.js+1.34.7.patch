@@ -1,0 +1,195 @@
+diff --git a/node_modules/whatsapp-web.js/src/util/Injected/Utils.js b/node_modules/whatsapp-web.js/src/util/Injected/Utils.js
+index 540078a..1f2ea03 100644
+--- a/node_modules/whatsapp-web.js/src/util/Injected/Utils.js
++++ b/node_modules/whatsapp-web.js/src/util/Injected/Utils.js
+@@ -3,6 +3,90 @@
+ exports.LoadUtils = () => {
+     window.WWebJS = {};
+ 
++    // [wa-bridge patch] WhatsApp Web 2.3000.x stopped exposing `_serialized` on
++    // live wid / message-key objects (wwebjs PR #201910, issue #201845). An
++    // undefined key then reaches IndexedDB and every read fails with the
++    // minified "r: r" DataError. Resolve a serialized id by KIND, in order:
++    //   1. `_serialized` (the documented name)
++    //   2. by VALUE, kind-specific - survives renames:
++    //        msgkey: only /^(true|false)_/ (a message key also holds the
++    //                remote/participant WIDs: matching user@server here would
++    //                return the CHAT id and break dedup)
++    //        wid:    only "user@server"
++    //   3. `$1` (current minified name) - only if it matches the kind too
++    //   4. wid only: `${user}@${server}`
++    // Nothing kind-appropriate -> undefined: the caller skips the item. Never
++    // guess. Every fallback and every miss is reported via console.warn with
++    // the prefix below; the bridge forwards those lines to its log as warn.
++    window.WWebJS.__ID_FALLBACK = '[wa-bridge:id-fallback]';
++    window.WWebJS.__ID_PATTERNS = {
++        msgkey: /^(true|false)_/,
++        wid: /^[^\s@_]+@[a-z.]+$/,
++    };
++    window.WWebJS.__serializedOf = (key, kind, where) => {
++        if (key === null || key === undefined) return key;
++        if (typeof key === 'string') return key;
++        if (typeof key !== 'object') return undefined;
++        if (typeof key._serialized === 'string') return key._serialized;
++        const pattern = window.WWebJS.__ID_PATTERNS[kind];
++        const warn = (how) =>
++            console.warn(window.WWebJS.__ID_FALLBACK, where || '?', kind, how);
++        if (!pattern) { warn('unknown kind'); return undefined; }
++        const byValue = Object.values(key).find(
++            (v) => typeof v === 'string' && pattern.test(v),
++        );
++        if (byValue) { warn('value'); return byValue; }
++        if (typeof key.$1 === 'string' && pattern.test(key.$1)) {
++            warn('$1');
++            return key.$1;
++        }
++        if (kind === 'wid' && typeof key.user === 'string' && typeof key.server === 'string') {
++            warn('user@server');
++            return `${key.user}@${key.server}`;
++        }
++        warn('unresolved');
++        return undefined;
++    };
++
++    // Normalize a serialized model in place so the Node-side structures
++    // (Chat.js / Message.js read `id._serialized`) get the field they expect.
++    // Read path only. Never throws.
++    window.WWebJS.__ensureSerializedIds = (model, where) => {
++        try {
++            if (!model || typeof model !== 'object') return model;
++            // idKind: what `obj.id` is - 'msgkey' for messages, 'wid' for
++            // chats / participants. remote / from / to / author are WIDs.
++            const fixId = (obj, idKind, w) => {
++                if (!obj || typeof obj !== 'object') return;
++                const id = obj.id;
++                if (id && typeof id === 'object') {
++                    if (typeof id._serialized !== 'string') {
++                        const s = window.WWebJS.__serializedOf(id, idKind, `${w}.id`);
++                        if (s !== undefined) obj.id = Object.assign({}, id, { _serialized: s });
++                    }
++                    if (obj.id.remote && typeof obj.id.remote === 'object') {
++                        obj.id = Object.assign({}, obj.id, {
++                            remote: window.WWebJS.__serializedOf(obj.id.remote, 'wid', `${w}.id.remote`),
++                        });
++                    }
++                }
++                for (const k of ['from', 'to', 'author']) {
++                    if (obj[k] && typeof obj[k] === 'object') {
++                        const s = window.WWebJS.__serializedOf(obj[k], 'wid', `${w}.${k}`);
++                        if (s !== undefined) obj[k] = s;
++                    }
++                }
++            };
++            const kind = where === 'message' ? 'msgkey' : 'wid';
++            fixId(model, kind, where || 'model');
++            if (model.groupMetadata && Array.isArray(model.groupMetadata.participants)) {
++                model.groupMetadata.participants.forEach((p) => fixId(p, 'wid', `${where}.participant`));
++            }
++            if (model.lastMessage) fixId(model.lastMessage, 'msgkey', `${where}.lastMessage`);
++        } catch (_) { /* best effort */ }
++        return model;
++    };
++
+     /**
+      * Helper function that compares between two WWeb versions. Its purpose is to help the developer to choose the correct code implementation depending on the comparison value and the WWeb version.
+      * @param {string} lOperand The left operand for the WWeb version string to compare with
+@@ -802,6 +886,7 @@ exports.LoadUtils = () => {
+ 
+     window.WWebJS.getMessageModel = (message) => {
+         const msg = message.serialize();
++        window.WWebJS.__ensureSerializedIds(msg, 'message');
+ 
+         const { findLinks } = window.require('WALinkify');
+ 
+@@ -828,9 +913,9 @@ exports.LoadUtils = () => {
+             msg.replyButtons = JSON.parse(JSON.stringify(msg.replyButtons));
+         }
+ 
+-        if (typeof msg.id.remote === 'object') {
++        if (msg.id && typeof msg.id.remote === 'object') {
+             msg.id = Object.assign({}, msg.id, {
+-                remote: msg.id.remote._serialized,
++                remote: window.WWebJS.__serializedOf(msg.id.remote, 'wid', 'message.id.remote'),
+             });
+         }
+ 
+@@ -917,28 +1002,41 @@ exports.LoadUtils = () => {
+         };
+     };
+ 
++    // [wa-bridge patch] One broken chat must not reject the whole listing:
++    // a chat whose model can't be built is skipped and reported.
++    window.WWebJS.__getChatModelSafe = async (chat, opts) => {
++        try {
++            return await window.WWebJS.getChatModel(chat, opts);
++        } catch (err) {
++            console.warn(window.WWebJS.__ID_FALLBACK, 'getChatModel', 'skipped chat',
++                String((err && err.name) || err));
++            return null;
++        }
++    };
++
+     window.WWebJS.getChats = async () => {
+         const chats = window.require('WAWebCollections').Chat.getModelsArray();
+         const chatPromises = chats.map((chat) =>
+-            window.WWebJS.getChatModel(chat),
++            window.WWebJS.__getChatModelSafe(chat),
+         );
+-        return await Promise.all(chatPromises);
++        return (await Promise.all(chatPromises)).filter(Boolean);
+     };
+ 
+     window.WWebJS.getChannels = async () => {
+         const channels = window
+             .require('WAWebCollections')
+             .WAWebNewsletterCollection.getModelsArray();
+-        const channelPromises = channels?.map((channel) =>
+-            window.WWebJS.getChatModel(channel, { isChannel: true }),
++        const channelPromises = (channels || []).map((channel) =>
++            window.WWebJS.__getChatModelSafe(channel, { isChannel: true }),
+         );
+-        return await Promise.all(channelPromises);
++        return (await Promise.all(channelPromises)).filter(Boolean);
+     };
+ 
+     window.WWebJS.getChatModel = async (chat, { isChannel = false } = {}) => {
+         if (!chat) return null;
+ 
+         const model = chat.serialize();
++        window.WWebJS.__ensureSerializedIds(model, 'chat');
+         model.isGroup = false;
+         model.isMuted = chat.mute?.expiration !== 0;
+         if (isChannel) {
+@@ -953,7 +1051,7 @@ exports.LoadUtils = () => {
+             model.isGroup = true;
+             const chatWid = window
+                 .require('WAWebWidFactory')
+-                .createWid(chat.id._serialized);
++                .createWid(window.WWebJS.__serializedOf(chat.id, 'wid', 'chat.id'));
+             const groupMetadata =
+                 window.require('WAWebCollections').GroupMetadata ||
+                 window.require('WAWebCollections').WAWebGroupMetadataCollection;
+@@ -981,16 +1079,18 @@ exports.LoadUtils = () => {
+ 
+         model.lastMessage = null;
+         if (model.msgs && model.msgs.length) {
+-            const lastMessage = chat.lastReceivedKey
++            // Unresolvable key -> no lastMessage (never pass undefined to IndexedDB).
++            const lastKey = chat.lastReceivedKey
++                ? window.WWebJS.__serializedOf(chat.lastReceivedKey, 'msgkey', 'chat.lastReceivedKey')
++                : undefined;
++            const lastMessage = lastKey
+                 ? window
+                       .require('WAWebCollections')
+-                      .Msg.get(chat.lastReceivedKey._serialized) ||
++                      .Msg.get(lastKey) ||
+                   (
+                       await window
+                           .require('WAWebCollections')
+-                          .Msg.getMessagesById([
+-                              chat.lastReceivedKey._serialized,
+-                          ])
++                          .Msg.getMessagesById([lastKey])
+                   )?.messages?.[0]
+                 : null;
+             lastMessage &&

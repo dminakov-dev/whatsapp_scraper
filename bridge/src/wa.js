@@ -11,6 +11,34 @@ import { inviteCodeOf } from './invite.js';
 
 const { Client, LocalAuth } = wwebjs;
 
+// Prefix of the console.warn lines our whatsapp-web.js patch (patches/) emits inside the
+// page whenever an id had to be resolved by a fallback, or couldn't be resolved at all.
+export const ID_FALLBACK_PREFIX = '[wa-bridge:id-fallback]';
+
+/**
+ * Forward the patch's page-side warnings to the bridge log at warn level, so we notice when
+ * WhatsApp renames internals again. The same warning repeats per message, so within
+ * `windowMs` repeats are only counted and reported with the next line for that key.
+ */
+export function watchPageConsole(page, log, { now = Date.now, windowMs = 60_000 } = {}) {
+  const seen = new Map(); // key -> { last, suppressed }
+  page.on('console', (message) => {
+    const text = typeof message?.text === 'function' ? message.text() : String(message);
+    if (!text.startsWith(ID_FALLBACK_PREFIX)) return;
+    const detail = text.slice(ID_FALLBACK_PREFIX.length).trim();
+    const t = now();
+    const entry = seen.get(detail);
+    if (entry && t - entry.last < windowMs) {
+      entry.suppressed += 1;
+      return;
+    }
+    log('warn', 'whatsapp-web.js id fallback', {
+      detail, ...(entry?.suppressed ? { repeated_since_last: entry.suppressed } : {}),
+    });
+    seen.set(detail, { last: t, suppressed: 0 });
+  });
+}
+
 const firstLine = (err) => String(err?.message ?? err).split('\n')[0].slice(0, 200);
 
 /**
@@ -46,6 +74,12 @@ export function createWa(cfg, { log = () => {} } = {}) {
   });
 
   let status = { state: 'STARTING', ready: false, paired: null };
+  let consoleWatched = false;
+  function watchConsoleOnce() {
+    if (consoleWatched || !client.pupPage) return;
+    consoleWatched = true;
+    watchPageConsole(client.pupPage, log);
+  }
   const messageHandlers = [];
   const stateHandlers = [];
 
@@ -64,12 +98,16 @@ export function createWa(cfg, { log = () => {} } = {}) {
     console.log('\nScan with the phone: WhatsApp > Linked devices > Link a device\n');
     qrcode.generate(qr, { small: true });
   });
-  client.on('authenticated', () => setStatus({ state: 'AUTHENTICATED', paired: true }));
+  client.on('authenticated', () => {
+    watchConsoleOnce();
+    setStatus({ state: 'AUTHENTICATED', paired: true });
+  });
   client.on('auth_failure', (msg) => {
     log('error', 'auth failure', { msg: String(msg) });
     setStatus({ state: 'UNPAIRED', ready: false, paired: false });
   });
   client.on('ready', async () => {
+    watchConsoleOnce();
     setStatus({ state: 'CONNECTED', ready: true, paired: true });
     if (cfg.presenceUnavailable) {
       try {
