@@ -1,12 +1,23 @@
 // Wiring: adapter events -> filter -> webhook, plus the HTTP server. No I/O setup here
 // (that is main.js), so tests build the whole bridge around a fake adapter.
-import { chatIdOf, createAllowlist, toContract } from './filter.js';
+import { chatIdOf, chatKind, createAllowlist, toContract } from './filter.js';
+import { maskIds } from './mask.js';
 import { createServer } from './server.js';
 
 export function createBridge(cfg, wa, { log = () => {}, webhook, recorder = null, now } = {}) {
   const stats = { forwarded: 0, dropped: {} };
   // One allowlist for both paths, so webhook and history forward exactly the same messages.
   const allow = createAllowlist({ base: cfg.contentTypes, extraByChat: cfg.extraTypesByChat });
+
+  // One line per incoming WhatsApp message, forwarded or dropped: chat kind, masked ids and
+  // type only, never the text. No line at all means whatsapp-web.js never fired 'message'.
+  function logReceived(msg, chatId, outcome) {
+    const id = typeof msg?.id === 'object' ? msg.id?._serialized : msg?.id;
+    log('info', 'message received', {
+      chat_kind: chatKind(chatId), chat_id: maskIds(chatId ?? null), id: maskIds(id ?? null),
+      type: typeof msg?.type === 'string' ? msg.type : null, ...outcome,
+    });
+  }
 
   // One incoming WhatsApp message -> webhook, if it is collectable content.
   async function forward(msg) {
@@ -16,9 +27,11 @@ export function createBridge(cfg, wa, { log = () => {}, webhook, recorder = null
       const res = toContract(msg, wa.chatInfoById(chatId), allow);
       if (!res.message) {
         stats.dropped[res.drop] = (stats.dropped[res.drop] || 0) + 1;
+        logReceived(msg, chatId, { result: 'dropped', reason: res.drop });
         return { dropped: res.drop };
       }
       stats.forwarded += 1;
+      logReceived(msg, chatId, { result: 'forwarded' });
       return await webhook.message(res.message);
     } catch (err) {
       // One bad event must never take the bridge down.

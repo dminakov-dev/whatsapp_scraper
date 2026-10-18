@@ -11,6 +11,30 @@ import { inviteCodeOf } from './invite.js';
 
 const { Client, LocalAuth } = wwebjs;
 
+const firstLine = (err) => String(err?.message ?? err).split('\n')[0].slice(0, 200);
+
+/**
+ * Groups (getChats) and channels (getChannels) are listed independently: on a live session
+ * getChats() can fail inside WhatsApp Web (minified "r: r" error) while channels still work.
+ * One failing half is logged and skipped; only when both fail does the request fail (503).
+ */
+export async function listAllChats(client, log = () => {}) {
+  const [chats, channels] = await Promise.allSettled([client.getChats(), client.getChannels()]);
+  const all = [];
+  const failed = [];
+  for (const [name, res] of [['getChats', chats], ['getChannels', channels]]) {
+    if (res.status === 'fulfilled') all.push(...res.value);
+    else failed.push({ name, error: firstLine(res.reason) });
+  }
+  if (failed.length === 2) {
+    throw new Error(`chat listing failed: ${failed.map((f) => `${f.name}: ${f.error}`).join('; ')}`);
+  }
+  for (const f of failed) {
+    log('warn', 'partial chat list', { failed: f.name, error: f.error });
+  }
+  return all;
+}
+
 export function createWa(cfg, { log = () => {} } = {}) {
   const client = new Client({
     // Session lives in bridge/.wwebjs_auth/ (gitignored); the QR is needed only once.
@@ -80,8 +104,7 @@ export function createWa(cfg, { log = () => {} } = {}) {
   return {
     status: () => status,
     async listChats() {
-      const [chats, channels] = await Promise.all([client.getChats(), client.getChannels()]);
-      const all = [...chats, ...channels];
+      const all = await listAllChats(client, log);
       for (const c of all) chatInfo(c);
       return all;
     },

@@ -41,7 +41,10 @@ Then in the root `.env`: `BRIDGE_URL=http://127.0.0.1:8002` (the mock stays on 8
 - **`GET /health`.** `ready` + state `CONNECTED` → `200 {ok:true}`. Starting / connecting /
   `CONFLICT` → `200 {ok:false, state}`. QR pending, logged out, `UNPAIRED*` → `401`.
 - **`GET /chats`.** `client.getChats()` + `client.getChannels()`, deduplicated; only `@g.us`
-  and `@newsletter`. Groups also carry `announce` (`groupMetadata.announce`: admins-only
+  and `@newsletter`. The two calls are independent (`listAllChats`): on the first live session
+  `getChats()` failed inside WhatsApp Web (minified `r: r` error) while the session was healthy,
+  so a failing half is logged as `partial chat list` and the other half is still served; only
+  when both fail does `/chats` answer 503. Groups also carry `announce` (`groupMetadata.announce`: admins-only
   posting, behaves like a channel).
 - **`GET /chats/{id}/messages`.** `fetchMessages({limit: M})` returns the **latest** M and only
   sorts when it cuts, so the bridge sorts ascending itself, filters, keeps `timestamp >= since`
@@ -52,6 +55,9 @@ Then in the root `.env`: `BRIDGE_URL=http://127.0.0.1:8002` (the mock stays on 8
   WhatsApp still had older messages (false when the chat simply has nothing older).
 - **Webhook.** The `message` event (incoming only; `message_create` would add our own) goes
   through the same filter as history, so both paths produce identical messages.
+  Every incoming message logs one `message received` line: chat kind, masked ids
+  (`********4567@c.us`, same rule as `collector/privacy.py`), type and `forwarded` or
+  `dropped` + reason. Never the text. No such line at all means `message` didn't fire.
 - **Ids.** `id._serialized` everywhere; `chat_id` is `id.remote`.
 
 ### Status codes

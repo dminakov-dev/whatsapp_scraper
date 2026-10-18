@@ -21,8 +21,8 @@
 
 ## Status (replace, don't append)
 - Talkman SIM active (stays in the main phone, only for SMS). WhatsApp registered on a separate old Android phone as primary device: clean install, no restored backup, contacts permission denied, backup off, neutral profile, 2FA PIN on. Subscribing manually to 3–5 public channels.
-- Phase 1 done: collector, `bridge_mock`, README. Phase 2 bridge built and tested on handwritten fixtures, **never linked yet**. External review fixed 2026-10-17 (collector hardening, privacy masking in logs, allowlist hook, `truncated` signal). Export pseudonymization was removed again: exports keep full ids, and the sample excludes regular groups. Tests: 240 pytest, 57 Node. Everything pushed to the private repo `dminakov-dev/whatsapp_scrpr` (main @ `6be9ded` + this file).
-- **Next: first real link 2026-10-18 — follow the runbook below step by step, report after each stage.**
+- Phase 1 done: collector, `bridge_mock`, README. Phase 2 bridge built and tested on handwritten fixtures, **never linked yet**. External review fixed 2026-10-17 (collector hardening, privacy masking in logs, allowlist hook, `truncated` signal). Export pseudonymization was removed again: exports keep full ids, and the sample excludes regular groups. Tests: 240 pytest, 65 Node. Everything pushed to the private repo `dminakov-dev/whatsapp_scrpr` (main @ `6be9ded` + this file).
+- **2026-10-18 live:** linked, `CONNECTED`, receiver gets `state` events; 0 messages so far. `/chats` returned 503 because `client.getChats()` fails inside WhatsApp Web (`r: r`) → fixed: groups and channels listed independently (`listAllChats`); every incoming message now logs `message received` (masked, no text). Dima fixes `BRIDGE_URL` (was 8001 = mock) and restarts the bridge. Next: re-check `/chats`, then stage B (one `--once` tick on one channel).
 - Not done: live link, sample data, REPORT.md. `account_events` holds **mock data only** — not usable as observed limits.
 
 ## Runbook: first real link (2026-10-18)
