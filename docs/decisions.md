@@ -83,6 +83,13 @@ id-looking string" rule would return the chat id as the message id and store eve
 a chat as duplicates of one. When nothing fits, the item is skipped and a warning is logged.
 **Trade-off:** we own a patch against library internals until upstream releases a fix.
 
+## Old-format group ids stay unmasked in the submission export
+Groups created before WhatsApp's 2019+ id scheme have ids like `<creator phone>-<timestamp>@g.us`,
+so the creator's number is inside the group id. Masking only targets person JIDs (`@c.us`,
+`@lid`), so these ids are not masked, and we keep it that way: announcement-only groups go into
+the submission export unmasked, because every member of the group sees the creator's number
+anyway. Regular groups are never exported for submission, so the question doesn't arise there.
+
 ## Post-homework TODO (not now)
 - **Location and contact cards.** The bridge whitelist drops `location`, `vcard` and `multi_vcard`
   (coordinates, phone numbers). Collecting them would need explicit fields and a privacy review.

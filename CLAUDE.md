@@ -22,7 +22,7 @@
 ## Status (replace, don't append)
 - Talkman SIM active (stays in the main phone, only for SMS). WhatsApp registered on a separate old Android phone as primary device: clean install, no restored backup, contacts permission denied, backup off, neutral profile, 2FA PIN on. Subscribing manually to 3–5 public channels.
 - Phase 1 done: collector, `bridge_mock`, README. Phase 2 bridge built and tested on handwritten fixtures, **never linked yet**. External review fixed 2026-10-17 (collector hardening, privacy masking in logs, allowlist hook, `truncated` signal). Export pseudonymization was removed again: exports keep full ids, and the sample excludes regular groups. Tests: 240 pytest, 76 Node. Everything pushed to the private repo `dminakov-dev/whatsapp_scrpr` (main @ `6be9ded` + this file).
-- **2026-10-18 live:** linked, `CONNECTED`. Every read failed inside WhatsApp Web (`r: r`): 2.3000.x dropped `_serialized`. Fixed by a local read-path patch to whatsapp-web.js (`bridge/patches/`, patch-package `postinstall`; ids resolved by kind, never guessed; fallbacks logged as `whatsapp-web.js id fallback`), plus independent group/channel listing and a `message received` log line per incoming message. **Next:** restart the bridge, check `/chats`, then one stage-B step (sync, disable groups, one `--once` tick, `BATCH_SIZE=10`).
+- **2026-10-18 live:** linked, `CONNECTED`. whatsapp-web.js read paths patched for WhatsApp Web 2.3000.x (`bridge/patches/`). `/chats`: 6 channels + 2 announcement-only groups (groups **disabled** until Dima says). First stage-B tick OK: 10 CNN posts, real channel permalinks, `history_start` (channel history ≈ 1 month, WhatsApp's limit), history call ~6 s → `OP_TIMEOUT_MS=20000`, `REQUEST_TIMEOUT=25`. Quiet continuous channel backfill running (command in runbook step 4). Results: `docs/report-notes.md` "Live observations".
 - Not done: live link, sample data, REPORT.md. `account_events` holds **mock data only** — not usable as observed limits.
 
 ## Runbook: first real link (2026-10-18)
@@ -43,15 +43,15 @@
 - Sync targets without fetching history, then switch groups off (sync keeps `enabled`):
   `.venv/bin/python -c "from collector.config import load_config; from collector.source import BridgeClient; from collector import db; c=load_config(); s=BridgeClient(c.bridge_url, token=c.bridge_token); print(db.sync_targets(db.connect(c.db_path), s.list_chats()))"`
   then `.venv/bin/python -m collector.targets list` and `… targets disable <group id>` for every `@g.us`.
-- Run the worker slowly: `BATCH_SIZE=10 TICK_SLEEP=120 JITTER=60 TARGET_INTERVAL=1800 SYNC_EVERY=30 .venv/bin/python -m collector.backfill`
+- Run the worker slowly (stop with Ctrl+C, restart with the same command; cursors make it resume): `BATCH_SIZE=10 TICK_SLEEP=120 JITTER=60 TARGET_INTERVAL=1800 SYNC_EVERY=30 .venv/bin/python -m collector.backfill`
   (`HISTORY_MIN_INTERVAL=90` < `TICK_SLEEP`, so the bridge's 429 is only a safety net; a 429 pauses the whole loop). Groups only later, after Dima's OK.
 
 **5. Live-validation checklist** (record each result in `docs/report-notes.md`):
 - [ ] group delivery: a group message arrives via webhook with `author` (often `@lid`);
-- [ ] channel delivery: does `message` fire for channel posts, or do they arrive only via backfill?
+- [x] channel delivery: `message` fires for channel posts (2026-10-18; first `forwarded` after the patch still to confirm);
 - [ ] id consistency: the same message via webhook and history has the same `id`. Check no near-duplicates: `SELECT chat_id, date, text, COUNT(*) FROM messages GROUP BY 1,2,3 HAVING COUNT(*) > 1` must be empty;
-- [ ] channel permalink: is `channelMetadata.inviteCode` (or `inviteLink`) / `_data.serverId` present? Are URLs `https://whatsapp.com/channel/…` or still `wa://…`?
-- [ ] `truncated`: with `HISTORY_MAX_FETCH=100` the first channel backfill likely logs `history_truncated`; otherwise `history_start` (query in `docs/report-notes.md`);
+- [x] channel permalink: invite code and `serverId` present → `https://whatsapp.com/channel/…` (2026-10-18);
+- [x] `truncated`: first CNN collection logged `history_start` (not truncated): channel history ≈ 1 month is WhatsApp's limit (2026-10-18);
 - [ ] receiver outage: stop the receiver (Ctrl+C), let posts arrive (bridge logs `event lost`), restart it, let backfill run → the missed posts appear `via='backfill'`, no duplicates, no unexpected `possible_gap`.
 
 **6. Recorded fixtures.** The bridge writes raw responses to `bridge/fixtures/recorded/session.json` (gitignored: real text, member ids, `_data`). Then:
