@@ -38,8 +38,11 @@ Then in the root `.env`: `BRIDGE_URL=http://127.0.0.1:8002` (the mock stays on 8
 
 ## How it maps whatsapp-web.js to the contract
 
-- **`GET /health`.** `ready` + state `CONNECTED` → `200 {ok:true}`. Starting / connecting /
-  `CONFLICT` → `200 {ok:false, state}`. QR pending, logged out, `UNPAIRED*` → `401`.
+- **`GET /health`.** `ready` + state `CONNECTED` **and the page answers a no-op probe** →
+  `200 {ok:true}`. Starting / connecting / `CONFLICT` → `200 {ok:false, state}`. QR pending,
+  logged out, `UNPAIRED*` → `401`. Page lost → `503 {ok:false, state:"PAGE_DETACHED"}`; page
+  not answering the probe within 2 s → `503 {…"PAGE_UNRESPONSIVE"}`. Both mean
+  `bridge_unhealthy` for the collector: the whole loop pauses, targets are untouched.
 - **`GET /chats`.** `client.getChats()` + `client.getChannels()`, deduplicated; only `@g.us`
   and `@newsletter`. The two calls are independent (`listAllChats`): on the first live session
   `getChats()` failed inside WhatsApp Web (minified `r: r` error) while the session was healthy,
@@ -86,6 +89,24 @@ WhatsApp adds), `vcard` / `multi_vcard` (phone numbers), `location` (coordinates
 The allowlist is a hook (`createAllowlist` in `src/filter.js`), used by both the history and the
 webhook path. `EXTRA_TYPES_BY_CHAT` opens a type for one chat only. It forwards the type and caption
 but not type-specific fields: a `location` arrives as `type: "location"` without coordinates.
+
+## Lost page: detection and automatic recovery
+
+Live, 2026-10-19: the WhatsApp Web page under whatsapp-web.js detached (most likely after the
+Mac slept). The library fired no event, its state stayed `CONNECTED`, and every read failed with
+`Attempted to use detached Frame` for ~9 hours, while `/health` said ok, so the collector kept
+retrying chat by chat. Now (`src/recovery.js`, shared by both adapters):
+- **Detection:** an operation failing with a page/browser-gone error (`detached Frame`,
+  `Target closed`, `Session closed`, …), the page's `close` event, the browser's
+  `disconnected` event, or the `/health` probe.
+- **Reaction:** state `PAGE_DETACHED` (`/health` 503, a `state` webhook to the collector);
+  data endpoints answer 409 meanwhile.
+- **Recovery:** `client.destroy()` + `client.initialize()` after 30 s, 2 min, 10 min. The session
+  in `.wwebjs_auth/` is kept, so no QR. After `ready`, presence is set unavailable again and the
+  collector resumes on its next `/health`. After the 3rd failed attempt the bridge stays in
+  `PAGE_DETACHED` and logs `restart the bridge manually`.
+- An unlinked device (`UNPAIRED`) still shows as 401; an intentional shutdown is not treated as
+  a lost page.
 
 ## Patched whatsapp-web.js (WhatsApp Web 2.3000.x)
 

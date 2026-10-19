@@ -8,6 +8,7 @@ import qrcode from 'qrcode-terminal';
 import wwebjs from 'whatsapp-web.js';
 
 import { inviteCodeOf } from './invite.js';
+import { createSessionGuard, PAGE_DETACHED } from './recovery.js';
 
 const { Client, LocalAuth } = wwebjs;
 
@@ -74,12 +75,6 @@ export function createWa(cfg, { log = () => {} } = {}) {
   });
 
   let status = { state: 'STARTING', ready: false, paired: null };
-  let consoleWatched = false;
-  function watchConsoleOnce() {
-    if (consoleWatched || !client.pupPage) return;
-    consoleWatched = true;
-    watchPageConsole(client.pupPage, log);
-  }
   const messageHandlers = [];
   const stateHandlers = [];
 
@@ -92,6 +87,34 @@ export function createWa(cfg, { log = () => {} } = {}) {
     }
   }
 
+  // Page lost -> PAGE_DETACHED (/health 503) and destroy + initialize with growing pauses.
+  // destroy() closes only the browser: the session in .wwebjs_auth/ stays, so no new QR.
+  const guard = createSessionGuard({
+    log,
+    onDetached: () => setStatus({ state: PAGE_DETACHED, ready: false }),
+    restart: async () => {
+      pageWatched = null;
+      try {
+        await client.destroy();
+      } catch (err) {
+        log('warn', 'client destroy failed (continuing)', { error: String(err?.message ?? err) });
+      }
+      await client.initialize();
+    },
+  });
+
+  // Per page: forward the patch's console warnings, and notice the page or browser going away
+  // even when no request is running. A restart creates a new page, so this runs again.
+  let pageWatched = null;
+  function watchPage() {
+    const page = client.pupPage;
+    if (!page || pageWatched === page) return;
+    pageWatched = page;
+    watchPageConsole(page, log);
+    page.on('close', () => guard.detach('page closed'));
+    client.pupBrowser?.on('disconnected', () => guard.detach('browser disconnected'));
+  }
+
   client.on('qr', (qr) => {
     setStatus({ state: 'UNPAIRED', ready: false, paired: false });
     // eslint-disable-next-line no-console
@@ -99,7 +122,7 @@ export function createWa(cfg, { log = () => {} } = {}) {
     qrcode.generate(qr, { small: true });
   });
   client.on('authenticated', () => {
-    watchConsoleOnce();
+    watchPage();
     setStatus({ state: 'AUTHENTICATED', paired: true });
   });
   client.on('auth_failure', (msg) => {
@@ -107,7 +130,8 @@ export function createWa(cfg, { log = () => {} } = {}) {
     setStatus({ state: 'UNPAIRED', ready: false, paired: false });
   });
   client.on('ready', async () => {
-    watchConsoleOnce();
+    watchPage();
+    guard.ready();
     setStatus({ state: 'CONNECTED', ready: true, paired: true });
     if (cfg.presenceUnavailable) {
       try {
@@ -140,7 +164,39 @@ export function createWa(cfg, { log = () => {} } = {}) {
   }
 
   return {
-    status: () => status,
+    // While recovering, intermediate states from destroy()/initialize() (DISCONNECTED,
+    // AUTHENTICATED) must not look like an auth problem: report PAGE_DETACHED until 'ready'.
+    // An unlinked device (paired=false) still wins, so it shows as 401 / UNPAIRED.
+    status: () => (guard.state().detached && status.paired !== false
+      ? { ...status, state: PAGE_DETACHED, ready: false }
+      : status),
+    /**
+     * Cheap liveness check of the page for /health (no network, no WhatsApp request):
+     * 'ok' | 'detached' (page gone, recovery started) | 'unresponsive' (no answer in time).
+     */
+    async probe(timeoutMs = 2000) {
+      const page = client.pupPage;
+      if (!page) {
+        guard.detach('no page');
+        return 'detached';
+      }
+      let timer;
+      try {
+        await Promise.race([
+          page.evaluate(() => 1),
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error('probe timeout')), timeoutMs);
+          }),
+        ]);
+        return 'ok';
+      } catch (err) {
+        return guard.report(err) ? 'detached' : 'unresponsive';
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+    /** A WhatsApp operation failed; a gone page switches the bridge to recovery. */
+    reportError: (err) => guard.report(err),
     async listChats() {
       const all = await listAllChats(client, log);
       for (const c of all) chatInfo(c);
@@ -155,6 +211,9 @@ export function createWa(cfg, { log = () => {} } = {}) {
     onMessage: (h) => messageHandlers.push(h),
     onState: (h) => stateHandlers.push(h),
     start: () => client.initialize(),
-    stop: () => client.destroy(),
+    stop: () => {
+      guard.stop();               // an intentional shutdown is not a lost session
+      return client.destroy();
+    },
   };
 }

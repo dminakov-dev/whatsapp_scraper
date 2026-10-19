@@ -65,6 +65,11 @@ export function createBridge(cfg, wa, { log = () => {}, webhook, recorder = null
       wa.setSessionState(await readJson(req));
       return [200, wa.status()];
     });
+    server.extraRoutes.set('POST /_fake/break', async (req) => {
+      const { fail_restarts: failRestarts = 0 } = await readJson(req);
+      wa.breakPage({ failRestarts });
+      return [200, { broken: true }];
+    });
     server.extraRoutes.set('POST /_fake/emit', async (req) => {
       const { id } = await readJson(req);
       const msg = wa.findMessage(id);

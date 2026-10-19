@@ -14,7 +14,10 @@ async function main() {
   let wa;
   if (cfg.fakeFixtures) {
     const { createFakeWa, loadFixture } = await import('./fake-wa.js');
-    wa = createFakeWa(loadFixture(cfg.fakeFixtures));
+    // BRIDGE_FAKE_RECOVERY_MS=50,50 shortens recovery pauses for tests (fake mode only).
+    const delays = process.env.BRIDGE_FAKE_RECOVERY_MS
+      ? process.env.BRIDGE_FAKE_RECOVERY_MS.split(',').map(Number) : undefined;
+    wa = createFakeWa(loadFixture(cfg.fakeFixtures), { recovery: { log, ...(delays && { delays }) } });
     log('warn', 'FAKE MODE: serving fixtures, no WhatsApp session', { fixtures: cfg.fakeFixtures });
   } else {
     // Imported lazily so fake mode and tests never load puppeteer.

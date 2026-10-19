@@ -77,7 +77,7 @@ def env(tmp_path_factory, fixture_data):
         ["node", "src/main.js"], cwd=BRIDGE,
         env={**os.environ, "BRIDGE_PORT": str(bridge_port), "BRIDGE_TOKEN": TOKEN,
              "BRIDGE_FAKE_FIXTURES": str(FIXTURES), "WEBHOOK_URL": f"http://127.0.0.1:{rx_port}/webhook",
-             "WEBHOOK_BACKOFF_MS": "50"},
+             "WEBHOOK_BACKOFF_MS": "50", "BRIDGE_FAKE_RECOVERY_MS": "300,300,300"},
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     headers = {"X-Bridge-Token": TOKEN}
     wait_until(lambda: httpx.get(f"{cfg.bridge_url}/health", headers=headers).status_code == 200)
@@ -189,3 +189,31 @@ def test_wrong_token_is_auth_failure(env):
         assert exc.value.kind == "auth_failure"
     finally:
         bad.close()
+
+
+def test_lost_page_pauses_the_whole_loop_and_recovers(env):
+    """Live 2026-10-19: the page detached while /health said ok, so every read was a per-chat
+    503. Now /health probes the page: 503 -> bridge_unhealthy -> loop pause, targets untouched;
+    the bridge re-initializes the client by itself and the loop resumes."""
+    control, client, conn = env["control"], env["client"], env["conn"]
+    fails_before = dict(conn.execute("SELECT chat_id, fail_count FROM targets").fetchall())
+    control.post("/_fake/break", json={})
+
+    with pytest.raises(AccountError) as exc:
+        client.health()
+    assert exc.value.status_code == 503 and exc.value.kind == "bridge_unhealthy"
+
+    worker = Worker(env["cfg"], conn, client, rng=random.Random(0), sleep=lambda s: None)
+    assert worker.tick().status == "paused"
+    assert dict(conn.execute("SELECT chat_id, fail_count FROM targets").fetchall()) == fails_before
+
+    def healthy():
+        try:
+            return client.health()["ok"] is True
+        except AccountError:                # still recovering
+            return False
+
+    wait_until(healthy, timeout=10)
+    states = [r[0] for r in conn.execute(
+        "SELECT detail FROM account_events WHERE kind = 'state' ORDER BY id")]
+    assert "PAGE_DETACHED" in states and states[-1] == "CONNECTED"

@@ -38,6 +38,12 @@ Setup: whatsapp-web.js 1.34.7, Puppeteer 24.38 / Chromium 146, Node 25, WhatsApp
   WhatsApp's servers), vs a few ms for `/health` and `/chats`. Timeouts raised accordingly:
   bridge `OP_TIMEOUT_MS=20000`, collector `REQUEST_TIMEOUT=25`.
 - Old-format group ids embed the creator's phone number (`<phone>-<timestamp>@g.us`).
+- **Silent page loss overnight (2026-10-18 → 19).** From ~20:19 UTC every read failed with
+  `Attempted to use detached Frame` until a manual restart at 04:57 UTC, while the library still
+  reported `CONNECTED`. The likely trigger is the Mac sleeping, since the logs show multi-hour
+  gaps. Fixed: `/health` probes the page (503 → whole-loop pause) and the bridge re-initializes the
+  client itself (3 attempts). Lesson for the report: a session's *reported* state is not proof
+  that it works; health must exercise the real path.
 
 ## URL scheme (explain in the report)
 WhatsApp group messages have no public permalink. Channel posts may have one

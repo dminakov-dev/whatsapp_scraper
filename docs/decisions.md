@@ -90,6 +90,18 @@ so the creator's number is inside the group id. Masking only targets person JIDs
 the submission export unmasked, because every member of the group sees the creator's number
 anyway. Regular groups are never exported for submission, so the question doesn't arise there.
 
+## A lost page is a bridge-level failure, recovered automatically (3 attempts)
+A detached WhatsApp Web page made every read fail with a 503, which the collector treats as a
+per-chat error. The bridge was "up" for 9 hours while collecting nothing. Now the bridge
+probes the page in `/health` and answers 503 when the page is gone, which the collector
+already treats as `bridge_unhealthy` (whole-loop pause, targets untouched); no collector change.
+503 rather than `200 ok:false`, because `ok:false` is recorded as `auth_failure`, which would
+mislabel the event in the report. The bridge re-initializes the client itself (session files
+kept, no QR) after 30 s / 2 min / 10 min and then gives up. Unlimited reconnect loops would
+look like abuse to WhatsApp, and a failure that survives three restarts needs a human.
+**Trade-off:** a probe per `/health` (a no-op evaluate, no network) and a small state machine
+in the bridge.
+
 ## Post-homework TODO (not now)
 - **Location and contact cards.** The bridge whitelist drops `location`, `vcard` and `multi_vcard`
   (coordinates, phone numbers). Collecting them would need explicit fields and a privacy review.

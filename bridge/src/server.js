@@ -11,6 +11,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import http from 'node:http';
 
 import { chatKind, isCollectable, toChatEntry } from './filter.js';
+import { PAGE_DETACHED } from './recovery.js';
 import { historyWindow } from './window.js';
 
 // whatsapp-web.js / WAState values meaning "no usable session: someone must scan a QR".
@@ -74,9 +75,13 @@ export function createServer(cfg, wa, { log = () => {}, now = Date.now, onHistor
       return await Promise.race([op, timeout]);
     } catch (err) {
       if (err instanceof TimeoutError) {
-        op.catch(() => {}); // it may still fail later; nobody is waiting for it
+        // It may still fail later; nobody is waiting for it, but a lost page still counts.
+        op.catch((late) => wa.reportError?.(late));
         throw new HttpError(504, 'WhatsApp Web operation timed out');
       }
+      // A lost page/browser is a session problem: the adapter switches to PAGE_DETACHED, so
+      // /health stops saying ok and the collector pauses the whole loop.
+      if (!(err instanceof HttpError)) wa.reportError?.(err);
       throw err;
     } finally {
       clearTimeout(timer);
@@ -93,10 +98,20 @@ export function createServer(cfg, wa, { log = () => {}, now = Date.now, onHistor
     }
   }
 
-  function health() {
-    const s = wa.status();
+  // /health does not trust the adapter state alone: when it says CONNECTED, the page is probed
+  // (a no-op evaluate, no WhatsApp request). A lost page answers 503, which the collector
+  // treats as bridge_unhealthy: pause the whole loop, targets untouched.
+  async function health() {
+    let s = wa.status();
     if (s.paired === false || UNPAIRED_STATES.has(s.state)) {
       return [401, { ok: false, state: 'UNPAIRED' }];
+    }
+    if (s.state === PAGE_DETACHED) return [503, { ok: false, state: PAGE_DETACHED }];
+    if (s.ready && s.state === 'CONNECTED' && wa.probe) {
+      const probe = await wa.probe();
+      if (probe === 'unresponsive') return [503, { ok: false, state: 'PAGE_UNRESPONSIVE' }];
+      s = wa.status();
+      if (s.state === PAGE_DETACHED) return [503, { ok: false, state: PAGE_DETACHED }];
     }
     const ok = Boolean(s.ready) && s.state === 'CONNECTED';
     return [200, { ok, state: s.state }];

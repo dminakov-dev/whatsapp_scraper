@@ -21,8 +21,8 @@
 
 ## Status (replace, don't append)
 - Talkman SIM active (stays in the main phone, only for SMS). WhatsApp registered on a separate old Android phone as primary device: clean install, no restored backup, contacts permission denied, backup off, neutral profile, 2FA PIN on. Subscribing manually to 3–5 public channels.
-- Phase 1 done: collector, `bridge_mock`, README. Phase 2 bridge built and tested on handwritten fixtures, **never linked yet**. External review fixed 2026-10-17 (collector hardening, privacy masking in logs, allowlist hook, `truncated` signal). Export pseudonymization was removed again: exports keep full ids, and the sample excludes regular groups. Tests: 240 pytest, 76 Node. Everything pushed to the private repo `dminakov-dev/whatsapp_scrpr` (main @ `6be9ded` + this file).
-- **2026-10-18 live:** linked, `CONNECTED`. whatsapp-web.js read paths patched for WhatsApp Web 2.3000.x (`bridge/patches/`). `/chats`: 6 channels + 2 announcement-only groups (groups **disabled** until Dima says). First stage-B tick OK: 10 CNN posts, real channel permalinks, `history_start` (channel history ≈ 1 month, WhatsApp's limit), history call ~6 s → `OP_TIMEOUT_MS=20000`, `REQUEST_TIMEOUT=25`. Quiet continuous channel backfill running (command in runbook step 4). Results: `docs/report-notes.md` "Live observations".
+- Phase 1 done: collector, `bridge_mock`, README. Phase 2 bridge built and tested on handwritten fixtures, **never linked yet**. External review fixed 2026-10-17 (collector hardening, privacy masking in logs, allowlist hook, `truncated` signal). Export pseudonymization was removed again: exports keep full ids, and the sample excludes regular groups. Tests: 241 pytest, 85 Node. Everything pushed to the private repo `dminakov-dev/whatsapp_scrpr` (main @ `6be9ded` + this file).
+- **2026-10-18 live:** linked, `CONNECTED`. whatsapp-web.js read paths patched for WhatsApp Web 2.3000.x (`bridge/patches/`). `/chats`: 6 channels + 2 announcement-only groups (groups **disabled** until Dima says). First stage-B tick OK: 10 CNN posts, real channel permalinks, `history_start` (channel history ≈ 1 month, WhatsApp's limit), history call ~6 s → `OP_TIMEOUT_MS=20000`, `REQUEST_TIMEOUT=25`. Quiet continuous channel backfill running (command in runbook step 4). 2026-10-19: page detached overnight (Mac sleep), /health still said ok → fixed: /health probes the page (503 `PAGE_DETACHED`), bridge auto-recovers (3 attempts). First webhook message stored. Keep the Mac awake while collecting (`caffeinate -i npm start` in `bridge/`). Results: `docs/report-notes.md` "Live observations".
 - Not done: live link, sample data, REPORT.md. `account_events` holds **mock data only** — not usable as observed limits.
 
 ## Runbook: first real link (2026-10-18)
@@ -31,7 +31,7 @@
 
 **1. Start order** (each in its own terminal, from the repo root):
 1. `.venv/bin/python -m collector.receiver` — receiver first, so no webhook is lost.
-2. `cd bridge && npm start` — bridge on 127.0.0.1:8002; first run prints a QR.
+2. `cd bridge && caffeinate -i npm start` — bridge on 127.0.0.1:8002; first run prints a QR. `caffeinate -i` keeps the Mac from sleeping while it runs (sleep detached the page on 2026-10-19).
 3. **No backfill process yet** (stage A is webhook only).
 
 **2. Link:** the old phone → WhatsApp → Linked devices → Link a device → scan the terminal QR. Wait for log `state CONNECTED` and `presence set to unavailable`. Check:
@@ -63,7 +63,8 @@
 - unexpected `401` / `UNPAIRED` / `CONFLICT` after linking, repeated `disconnected`, or a state you don't recognize;
 - anything that could send, react, mark as read, change presence to online or join (including a library option or upgrade that might do it implicitly), or any need to touch the read-only guard;
 - direct-chat data showing up anywhere (logs, DB, recorded fixtures);
-- the whatsapp-web.js / WhatsApp Web version needs changing, or Puppeteer fails on Node 25 (try Node 22/24 LTS only after asking).
+- the whatsapp-web.js / WhatsApp Web version needs changing, or Puppeteer fails on Node 25 (try Node 22/24 LTS only after asking);
+- the bridge logs `restart the bridge manually` (automatic recovery gave up) or `PAGE_DETACHED` keeps recurring.
 
 ## Phases
 1. ~~Phase 1 — Python logic against `bridge_mock/`.~~ Done.

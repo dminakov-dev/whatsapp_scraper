@@ -20,9 +20,9 @@ export function recordingWebhook() {
 }
 
 export async function startBridge({ fixture = loadFixture(HANDWRITTEN), env = {}, webhook,
-                                    now } = {}) {
+                                    now, waOptions } = {}) {
   const cfg = loadConfig({ BRIDGE_TOKEN: TOKEN, BRIDGE_PORT: '1', BRIDGE_FAKE_FIXTURES: 'x', ...env });
-  const wa = createFakeWa(structuredClone(fixture));
+  const wa = createFakeWa(structuredClone(fixture), waOptions);
   const hook = webhook ?? recordingWebhook();
   const { server, forward } = createBridge(cfg, wa, { webhook: hook, now });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
