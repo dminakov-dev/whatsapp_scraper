@@ -8,10 +8,11 @@ in SQLite and exports it to JSONL. It is built to be **resilient**: a failing ch
 malformed event, a rate limit or a bridge outage never crashes the run, and a restart
 continues from where it stopped without creating duplicates.
 
-> **Status:** Phase 1 done; Phase 2 bridge built and tested against fixtures, not yet linked
-> to WhatsApp. All Python logic also runs against `bridge_mock/`, a fake bridge with fault
-> injection. The real bridge ([`bridge/`](bridge/README.md), Node.js + whatsapp-web.js) is
-> swapped in by changing `BRIDGE_URL` only.
+> **Status:** done and submitted as homework. The collector ran against a real WhatsApp account
+> through [`bridge/`](bridge/README.md) (Node.js + whatsapp-web.js) and collected 297 posts from
+> six public channels (`sample/messages.jsonl`). What we hit and what we stored is in
+> [`REPORT.md`](REPORT.md). The same Python code also runs against `bridge_mock/`, a fake bridge
+> with fault injection; the real bridge is swapped in by changing `BRIDGE_URL` only.
 
 ## Architecture
 
@@ -239,6 +240,8 @@ collector/
   targets.py    CLI: list / re-enable / disable targets
 bridge_mock/    fake bridge: same contract, history window, fault injection
 bridge/         real bridge: Node.js + whatsapp-web.js (see bridge/README.md)
+sample/         submission sample: 297 records from six public channels (JSONL)
+REPORT.md       limitations report: source, limits hit, how they were handled
 tests/          pytest
 ```
 
