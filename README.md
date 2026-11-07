@@ -254,6 +254,13 @@ tests/          pytest
 - Sample data for submission comes from public channels and is reviewed for private persons'
   data before committing.
 
+## Bonuses
+- **History backfill (done).** The first pass over a chat pulls the posts WhatsApp still holds (about
+  one month for channels) instead of only new ones: 294 of the 297 sample records came this way
+  (`via='backfill'`), the rest via the live webhook. Gaps are recorded as `history_start`,
+  `history_truncated` and `possible_gap` events.
+- Not done: multi-account rotation, proxy egress, stats dashboard, Docker.
+
 ## Known limitations
 
 See [`docs/report-notes.md`](docs/report-notes.md) for the full list (and `REPORT.md` in
